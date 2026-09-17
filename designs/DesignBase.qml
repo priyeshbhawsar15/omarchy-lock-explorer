@@ -25,6 +25,7 @@ Item {
   property bool inputEnabled: true
   property bool loadBackground: true
   property string passwordText: ""
+  property string screenName: ""
 
   // Set with `omarchy-shell lock setVideo`. Designs show it with VideoWallpaper,
   // which keeps the still wallpaper underneath when there is none. videoPlaying

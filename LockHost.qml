@@ -30,6 +30,7 @@ Item {
   property bool videoPlaying: true
   property bool unlockPlayback: false
   property real clipSpeed: 1
+  property string screenName: ""
   // 12-hour clocks with AM/PM, see `omarchy-shell lock setClockFormat`.
   property bool twelveHour: false
 
@@ -93,6 +94,7 @@ Item {
     if (it.unlockPlayback !== undefined) it.unlockPlayback = Qt.binding(function() { return host.unlockPlayback })
     if (it.clipSpeed !== undefined) it.clipSpeed = Qt.binding(function() { return host.clipSpeed })
     if (it.twelveHour !== undefined) it.twelveHour = Qt.binding(function() { return host.twelveHour })
+    if (it.screenName !== undefined) it.screenName = Qt.binding(function() { return host.screenName })
   }
 
   // Built-in designs come through the Loader; it also carries the Classic

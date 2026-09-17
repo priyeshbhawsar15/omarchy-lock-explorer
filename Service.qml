@@ -2258,6 +2258,7 @@ echo "$out"
           unlockPlayback: root.unlockPlayback && root.showsInput(lockSurface.screen)
           clipSpeed: root.clipSpeed
           twelveHour: root.twelveHour
+          screenName: lockSurface.screen ? lockSurface.screen.name : ""
           onUnlockFinished: root.releaseLock()
           onPasswordTextEdited: function(password) { root.enteredPassword = password }
           onSubmitPassword: function(password) { root.submitPassword(password) }

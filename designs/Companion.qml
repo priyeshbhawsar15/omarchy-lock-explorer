@@ -8,7 +8,7 @@ DesignBase {
   inputItem: input
   shakeOnFail: true
 
-  Wallpaper { anchors.fill: parent; lock: lock; blur: 1.0; dim: 0.2 }
+  Wallpaper { anchors.fill: parent; lock: lock; blur: 0; dim: 0.15 }
 
   MouseArea {
     anchors.fill: parent

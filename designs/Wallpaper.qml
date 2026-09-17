@@ -20,6 +20,12 @@ Item {
   property bool failed: false
   readonly property bool showing: player.hasVideo && player.playbackState === MediaPlayer.PlayingState
 
+  readonly property string screenName: lock && lock.screenName ? String(lock.screenName) : ""
+  readonly property var spanGroup: ["DP-6", "DP-4"]
+  readonly property int screenIndex: spanGroup.indexOf(screenName)
+  readonly property bool isSpanned: screenIndex >= 0 && spanGroup.length > 1
+  readonly property int totalScreens: isSpanned ? spanGroup.length : 1
+
   Rectangle {
     anchors.fill: parent
     color: Color.background
@@ -68,12 +74,21 @@ Item {
     }
   }
 
-  VideoOutput {
-    id: output
+  Item {
+    id: videoContainer
     anchors.fill: parent
-    fillMode: VideoOutput.PreserveAspectCrop
+    clip: true
+    visible: wall.showing
     opacity: wall.showing ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+
+    VideoOutput {
+      id: output
+      width: wall.isSpanned ? parent.width * wall.totalScreens : parent.width
+      height: parent.height
+      x: wall.isSpanned ? -parent.width * wall.screenIndex : 0
+      fillMode: VideoOutput.PreserveAspectCrop
+    }
   }
 
   function sync() {
