@@ -2606,7 +2606,7 @@ echo "$out"
 
   Process {
     id: wakeProcess
-    command: ["bash", "-c", "rm -f \"$1/display-off\"; main_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.x == 0 and .y == 0) | .name'); [[ -n $main_mon ]] && hyprctl dispatch \"hl.dsp.dpms({ action = 'enable', name = '$main_mon' })\" >/dev/null 2>&1; omarchy-system-wake", "bash", root.blankMarkerDir]
+    command: ["bash", "-c", "rm -f \"$1/display-off\"; main_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.x == 0 and .y == 0) | .name'); [[ -n $main_mon ]] && hyprctl repl \"hl.monitor({ output = '$main_mon', disabled = false })\" >/dev/null 2>&1; hyprctl dispatch 'hl.dsp.dpms({ action = \"enable\" })' >/dev/null 2>&1; omarchy-system-wake", "bash", root.blankMarkerDir]
   }
 
   Process {
@@ -2615,7 +2615,7 @@ echo "$out"
     // within two seconds of the output dropping.
     command: ["bash", "-c", root.displayBlankingSuppressed
       ? "omarchy-brightness-keyboard off"
-      : "mkdir -p \"$1\" && : > \"$1/display-off\"; omarchy-brightness-keyboard off; main_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.x == 0 and .y == 0) | .name'); [[ -n $main_mon ]] && hyprctl dispatch \"hl.dsp.dpms({ action = 'disable', name = '$main_mon' })\" >/dev/null 2>&1",
+      : "mkdir -p \"$1\" && : > \"$1/display-off\"; omarchy-brightness-keyboard off; main_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.x == 0 and .y == 0) | .name'); [[ -n $main_mon ]] && hyprctl repl \"hl.monitor({ output = '$main_mon', disabled = true })\" >/dev/null 2>&1",
       "bash", root.blankMarkerDir]
   }
 
