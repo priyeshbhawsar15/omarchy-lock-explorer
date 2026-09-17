@@ -97,7 +97,7 @@ Item {
   // session is locked before every suspend, so on a machine that sleeps this
   // delay is what the user sees on resume: too short and the screen goes dark
   // before there is time to type. Saved on the plugin entry as `blankMs`.
-  readonly property int defaultBlankDelay: 5000
+  readonly property int defaultBlankDelay: 60000
   property int blankDelayOverride: -1
   readonly property int configuredBlankDelay: {
     var cfg = root.settingsConfig
@@ -2606,7 +2606,7 @@ echo "$out"
 
   Process {
     id: wakeProcess
-    command: ["bash", "-c", "rm -f \"$1/display-off\"; omarchy-system-wake", "bash", root.blankMarkerDir]
+    command: ["bash", "-c", "rm -f \"$1/display-off\"; main_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.x == 0 and .y == 0) | .name'); [[ -n $main_mon ]] && hyprctl dispatch \"hl.dsp.dpms({ action = 'enable', name = '$main_mon' })\" >/dev/null 2>&1; omarchy-system-wake", "bash", root.blankMarkerDir]
   }
 
   Process {
@@ -2615,7 +2615,7 @@ echo "$out"
     // within two seconds of the output dropping.
     command: ["bash", "-c", root.displayBlankingSuppressed
       ? "omarchy-brightness-keyboard off"
-      : "mkdir -p \"$1\" && : > \"$1/display-off\"; omarchy-brightness-keyboard off; omarchy-brightness-display off",
+      : "mkdir -p \"$1\" && : > \"$1/display-off\"; omarchy-brightness-keyboard off; main_mon=$(hyprctl monitors -j 2>/dev/null | jq -r '.[] | select(.x == 0 and .y == 0) | .name'); [[ -n $main_mon ]] && hyprctl dispatch \"hl.dsp.dpms({ action = 'disable', name = '$main_mon' })\" >/dev/null 2>&1",
       "bash", root.blankMarkerDir]
   }
 
