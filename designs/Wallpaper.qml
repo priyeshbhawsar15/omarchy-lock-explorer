@@ -87,7 +87,7 @@ Item {
       width: wall.isSpanned ? parent.width * wall.totalScreens : parent.width
       height: parent.height
       x: wall.isSpanned ? -parent.width * wall.screenIndex : 0
-      fillMode: VideoOutput.PreserveAspectCrop
+      fillMode: wall.isSpanned ? VideoOutput.Stretch : VideoOutput.PreserveAspectCrop
     }
   }
 

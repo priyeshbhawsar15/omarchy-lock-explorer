@@ -2254,7 +2254,7 @@ echo "$out"
           loadBackground: root.locked
           passwordText: root.enteredPassword
           videoPath: root.videoPath
-          videoPlaying: root.locked && !root.screenBlanked
+          videoPlaying: root.locked
           unlockPlayback: root.unlockPlayback && root.showsInput(lockSurface.screen)
           clipSpeed: root.clipSpeed
           twelveHour: root.twelveHour
