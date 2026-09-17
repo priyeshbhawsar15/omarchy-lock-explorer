@@ -97,7 +97,7 @@ Item {
   // session is locked before every suspend, so on a machine that sleeps this
   // delay is what the user sees on resume: too short and the screen goes dark
   // before there is time to type. Saved on the plugin entry as `blankMs`.
-  readonly property int defaultBlankDelay: 60000
+  readonly property int defaultBlankDelay: 5000
   property int blankDelayOverride: -1
   readonly property int configuredBlankDelay: {
     var cfg = root.settingsConfig
