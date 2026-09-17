@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Effects
+import QtMultimedia
 import qs.Commons
 
 Item {
@@ -13,6 +14,11 @@ Item {
   property real vignetteTop: 0.35
   property real vignetteMiddle: 0.10
   property real vignetteBottom: 0.45
+
+  readonly property string videoUrl: lock && lock.videoUrl ? lock.videoUrl : ""
+  readonly property bool wants: (lock && lock.videoPlaying !== undefined ? lock.videoPlaying : true) && visible && videoUrl.length > 0 && !failed
+  property bool failed: false
+  readonly property bool showing: player.hasVideo && player.playbackState === MediaPlayer.PlayingState
 
   Rectangle {
     anchors.fill: parent
@@ -31,7 +37,7 @@ Item {
     cache: true
     sourceSize.width: width
     sourceSize.height: height
-    visible: wall.blur <= 0
+    visible: wall.blur <= 0 && !wall.showing
   }
 
   MultiEffect {
@@ -40,7 +46,7 @@ Item {
     // Hidden until the image decodes: with a broken wallpaper (e.g. WebP
     // without qt6-imageformats) the effect paints its empty source as solid
     // black, hiding the theme-color fallback underneath.
-    visible: wall.blur > 0 && image.status === Image.Ready
+    visible: wall.blur > 0 && image.status === Image.Ready && !wall.showing
     autoPaddingEnabled: false
     blurEnabled: wall.blur > 0 && image.status === Image.Ready
     blur: wall.blur
@@ -48,6 +54,41 @@ Item {
     blurMultiplier: 1.25
     contrast: wall.contrast
     brightness: -wall.dim
+  }
+
+  MediaPlayer {
+    id: player
+    source: wall.videoUrl
+    videoOutput: output
+    loops: MediaPlayer.Infinite
+    onSourceChanged: { wall.failed = false; wall.sync() }
+    onErrorOccurred: function(error, errorString) {
+      wall.failed = true
+      console.warn("lock-explorer: cannot play", wall.videoUrl, errorString)
+    }
+  }
+
+  VideoOutput {
+    id: output
+    anchors.fill: parent
+    fillMode: VideoOutput.PreserveAspectCrop
+    opacity: wall.showing ? 1 : 0
+    Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+  }
+
+  function sync() {
+    if (wants) player.play()
+    else player.pause()
+  }
+
+  onWantsChanged: sync()
+  Component.onCompleted: sync()
+
+  Rectangle {
+    anchors.fill: parent
+    color: "black"
+    visible: wall.showing
+    opacity: wall.dim
   }
 
   Rectangle {
