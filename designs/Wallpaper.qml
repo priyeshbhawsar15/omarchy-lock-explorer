@@ -18,7 +18,7 @@ Item {
   readonly property string videoUrl: lock && lock.videoUrl ? lock.videoUrl : ""
   readonly property bool wants: (lock && lock.videoPlaying !== undefined ? lock.videoPlaying : true) && visible && videoUrl.length > 0 && !failed
   property bool failed: false
-  readonly property bool showing: player.hasVideo && player.playbackState === MediaPlayer.PlayingState
+  readonly property bool showing: player.hasVideo && (player.playbackState === MediaPlayer.PlayingState || player.playbackState === MediaPlayer.PausedState)
 
   readonly property string screenName: lock && lock.screenName ? String(lock.screenName) : ""
   readonly property var spanGroup: ["DP-6", "DP-4"]
@@ -78,7 +78,7 @@ Item {
     id: videoContainer
     anchors.fill: parent
     clip: true
-    visible: wall.showing
+    visible: wall.wants
     opacity: wall.showing ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
 
