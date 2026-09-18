@@ -1013,21 +1013,25 @@ Item {
       // now, so a fixed offset would let a very wide one back onto the screen.
       x: -width - 200; y: -height - 200
       width: root.snapshotWidth; height: root.snapshotHeight
-      LockHost {
-        id: snapshotHost
+      Loader {
         anchors.fill: parent
-        designId: root.activeDesignId
-        revision: root.service ? root.service.designsRevision : 0
-        twelveHour: root.twelveHour
-        backgroundPath: root.service ? root.service.backgroundPath : ""
-        backgroundVersion: root.service ? root.service.backgroundVersion : 0
-        avatarPath: root.service ? root.service.avatarPath : ""
-        avatarVersion: root.service ? root.service.avatarVersion : 0
-        inputEnabled: false
-        loadBackground: root.opened || root.snapshotBusy
-        passwordText: ""
-        videoPath: root.service ? root.service.videoPath : ""
-        videoPlaying: false
+        active: root.snapshotBusy
+        sourceComponent: LockHost {
+          id: snapshotHost
+          anchors.fill: parent
+          designId: root.activeDesignId
+          revision: root.service ? root.service.designsRevision : 0
+          twelveHour: root.twelveHour
+          backgroundPath: root.service ? root.service.backgroundPath : ""
+          backgroundVersion: root.service ? root.service.backgroundVersion : 0
+          avatarPath: root.service ? root.service.avatarPath : ""
+          avatarVersion: root.service ? root.service.avatarVersion : 0
+          inputEnabled: false
+          loadBackground: root.opened || root.snapshotBusy
+          passwordText: ""
+          videoPath: root.service ? root.service.videoPath : ""
+          videoPlaying: false
+        }
       }
     }
 
@@ -3136,6 +3140,7 @@ Item {
                 Loader {
                   anchors.fill: parent
                   asynchronous: true
+                  active: cell.inView && root.opened
                   sourceComponent: LockHost {
                     designId: cell.modelData.id
                     revision: root.service ? root.service.designsRevision : 0
@@ -3526,19 +3531,23 @@ Item {
       anchors.fill: parent
       visible: root.fullPreview
 
-      LockHost {
+      Loader {
         anchors.fill: parent
-        designId: root.selectedDesign ? root.selectedDesign.id : Designs.DEFAULT_ID
-        revision: root.service ? root.service.designsRevision : 0
-        twelveHour: root.twelveHour
-        backgroundPath: root.service ? root.service.backgroundPath : ""
-        backgroundVersion: root.service ? root.service.backgroundVersion : 0
-        fingerprintConfigured: root.service ? root.service.fingerprintConfigured : false
-        inputEnabled: false
-        loadBackground: root.opened && root.fullPreview
-        passwordText: ""
-        videoPath: root.service ? root.service.videoPath : ""
-        videoPlaying: root.fullPreview
+        active: root.fullPreview && root.opened
+        sourceComponent: LockHost {
+          anchors.fill: parent
+          designId: root.selectedDesign ? root.selectedDesign.id : Designs.DEFAULT_ID
+          revision: root.service ? root.service.designsRevision : 0
+          twelveHour: root.twelveHour
+          backgroundPath: root.service ? root.service.backgroundPath : ""
+          backgroundVersion: root.service ? root.service.backgroundVersion : 0
+          fingerprintConfigured: root.service ? root.service.fingerprintConfigured : false
+          inputEnabled: false
+          loadBackground: root.opened && root.fullPreview
+          passwordText: ""
+          videoPath: root.service ? root.service.videoPath : ""
+          videoPlaying: root.fullPreview
+        }
       }
 
       MouseArea { anchors.fill: parent; onClicked: root.fullPreview = false }
