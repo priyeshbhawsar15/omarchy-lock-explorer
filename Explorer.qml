@@ -3149,8 +3149,8 @@ Item {
                     loadBackground: root.opened
                     passwordText: "omarchy"
                     videoPath: root.service ? root.service.videoPath : ""
-                    // Only the cell on screen decodes, the rest hold still.
-                    videoPlaying: cell.inView
+                    // Only the selected cell decodes its video; unselected cards display static background thumbnails.
+                    videoPlaying: cell.selected && cell.inView
                   }
                 }
               }
