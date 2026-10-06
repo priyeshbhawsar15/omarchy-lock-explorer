@@ -14,4 +14,16 @@ function keepDisplaysOn(config, pluginId, screens) {
   return false
 }
 
-if (typeof module !== "undefined") module.exports = { keepDisplaysOn: keepDisplaysOn }
+// Optical attenuation is independent of theme colors and never affects main.
+function dimOverlayOpacity(config, phase, monitor, locked) {
+  if (!locked || !config || phase !== "dim") return 0
+  var sides = config.sides || ["DP-4", "DP-6"]
+  if (monitor === String(config.main || "DP-5") || sides.indexOf(monitor) === -1) return 0
+  var value = config.overlayOpacity === undefined ? 0.35 : Number(config.overlayOpacity)
+  return isFinite(value) ? Math.max(0, Math.min(0.95, value)) : 0.35
+}
+
+if (typeof module !== "undefined") module.exports = {
+  keepDisplaysOn: keepDisplaysOn,
+  dimOverlayOpacity: dimOverlayOpacity
+}

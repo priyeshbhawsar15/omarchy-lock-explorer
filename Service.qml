@@ -135,8 +135,12 @@ Item {
     onExited: function(exitCode) {
       if (exitCode !== 0) {
         root.logEvent("display-power-failed=" + exitCode)
+        var failedPhase = root.appliedPowerPhase
         root.appliedPowerPhase = ""
-        return // Retry on the next activity, never in a failure spin-loop.
+        // A queued wake must still run after a failed dim. Retry the same
+        // failed phase only on new activity, never in a failure spin-loop.
+        if (root.powerPhase !== failedPhase) Qt.callLater(root.flushPowerPhase)
+        return
       }
       Qt.callLater(root.flushPowerPhase)
     }
@@ -2340,6 +2344,18 @@ echo "$out"
           onPasswordRequested: root.setAuthMode("password")
           onSubmitFido2Pin: function(pin) { root.submitFido2Pin(pin) }
         }
+      }
+
+      Rectangle {
+        anchors.fill: parent
+        z: 1000
+        // Literal optical black is intentional, not a static theme palette:
+        // themed backgrounds could brighten the image instead of dimming it.
+        color: Qt.rgba(0, 0, 0, 1)
+        opacity: DisplayPower.dimOverlayOpacity(root.phasedPower, root.powerPhase,
+          lockSurface.screen ? lockSurface.screen.name : "", root.lockRequested)
+        visible: opacity > 0
+        // No input handlers: activity reaches the existing secure lock surface.
       }
     }
   }

@@ -466,10 +466,18 @@ Use `safe_dir` and `put_file` from there rather than `mkdir -p`, `cp` or `>` whe
 ### Per-output locked idle power (fork)
 
 The plugin entry in `shell.json` optionally accepts:
-`"phasedPower": {"main":"DP-5","sides":["DP-4","DP-6"],"offMs":60000,"dimMs":300000}`.
+`"phasedPower": {"main":"DP-5","sides":["DP-4","DP-6"],"offMs":60000,"dimMs":300000,"overlayOpacity":0.35}`.
 This overrides the legacy all-output blanking behavior. Main DPMS turns off after
-one minute; side-monitor DDC brightness reaches zero after five minutes total
-and stays there without a repeating timer. Compositor input activity restores
+one minute; both side-monitor DDC brightness values reach zero after five
+minutes total and stay there without a repeating timer. A 35%-opaque optical
+black overlay covers each side lock surface in that dim phase, above all
+content, without intercepting input; it disappears immediately on activity
+or unlock. `overlayOpacity` accepts 0 (disabled) through 0.95 (very dark).
+Each brightness write is verified by VCP 10 readback. Failed detection probes
+fall back to directly checking brightness on connector-matched candidate buses;
+a failure on one side does not skip the other, and failures are reported.
+On this machine both DP-4 and DP-6 were hardware-tested at 0 and restored to
+their original 100; full-duration lock/overlay acceptance remains manual. Compositor input activity restores
 power/original brightness and restarts both deadlines. QML pointer geometry
 changes and authentication retries do not wake outputs in this mode. Unlock
 also restores power. Requires Python 3, ddcutil, accessible I2C devices and
