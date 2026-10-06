@@ -111,6 +111,57 @@ Item {
   }
   readonly property int blankDelay: blankDelayOverride >= 0 ? blankDelayOverride : configuredBlankDelay
 
+  readonly property var phasedPower: {
+    var list = root.settingsConfig && root.settingsConfig.plugins || []
+    for (var i = 0; i < list.length; ++i)
+      if (list[i].id === pluginId) return list[i].phasedPower || null
+    return null
+  }
+  property string powerPhase: "wake"
+  property string appliedPowerPhase: ""
+  function setPowerPhase(phase) {
+    powerPhase = phase
+    flushPowerPhase()
+  }
+  function flushPowerPhase() {
+    if (!phasedPower || phasedPowerProcess.running || appliedPowerPhase === powerPhase) return
+    phasedPowerProcess.command = ["python3", decodeURIComponent(Qt.resolvedUrl("display-power.py").toString().replace(/^file:\/\//, "")),
+      powerPhase, String(phasedPower.main || "DP-5")].concat(phasedPower.sides || ["DP-4", "DP-6"])
+    appliedPowerPhase = powerPhase
+    phasedPowerProcess.running = true
+  }
+  Process {
+    id: phasedPowerProcess
+    onExited: function(exitCode) {
+      if (exitCode !== 0) {
+        root.logEvent("display-power-failed=" + exitCode)
+        root.appliedPowerPhase = ""
+        return // Retry on the next activity, never in a failure spin-loop.
+      }
+      Qt.callLater(root.flushPowerPhase)
+    }
+  }
+  // Compositor input idle, not MouseArea coordinate changes: output power
+  // transitions can synthesize pointer changes without physical activity.
+  IdleMonitor {
+    enabled: !!root.phasedPower && root.lockRequested
+    timeout: 1
+    respectInhibitors: false
+    onIsIdleChanged: {
+      if (!isIdle && root.lockRequested) root.armBlankTimer()
+    }
+  }
+  Timer {
+    id: sideDimTimer
+    interval: root.phasedPower ? Number(root.phasedPower.dimMs || 300000) : 300000
+    property double armedAt: 0
+    onTriggered: {
+      if (Date.now() - armedAt > interval + 2000) {
+        if (root.lockRequested) root.armBlankTimer()
+      } else if (root.lockRequested) root.setPowerPhase("dim")
+    }
+  }
+
   // When true the display stays powered while locked: the DPMS-off is skipped
   // entirely, so video designs keep playing and slow monitors are never
   // re-blanked. Takes precedence over blankDelay. Lives on the plugin entry
@@ -1884,6 +1935,7 @@ echo "$out"
     pendingSessionLockTimer.stop()
     resetAuthenticationState()
     idleBlankTimer.stop()
+    sideDimTimer.stop()
     runWake()
 
     // The surface has to stay up while it animates away -- dropping the lock
@@ -1938,17 +1990,35 @@ echo "$out"
   }
 
   function armBlankTimer() {
+    if (phasedPower) {
+      setPowerPhase("wake")
+      sideDimTimer.armedAt = Date.now()
+      sideDimTimer.restart()
+    }
     idleBlankTimer.armedAt = Date.now()
     idleBlankTimer.restart()
   }
 
   function runWake() {
+    if (phasedPower) {
+      // PAM retries and QML pointer geometry changes are not user activity.
+      if (!lockRequested) {
+        idleBlankTimer.stop()
+        sideDimTimer.stop()
+        setPowerPhase("wake")
+      }
+      return
+    }
     screenBlanked = false
     if (!wakeProcess.running) wakeProcess.running = true
     if (lockRequested) armBlankTimer()
   }
 
   function runBlank() {
+    if (phasedPower) {
+      setPowerPhase("off")
+      return
+    }
     if (keepDisplayOn) return
     screenBlanked = !displayBlankingSuppressed
     if (!blankProcess.running) blankProcess.running = true
@@ -2638,7 +2708,7 @@ echo "$out"
 
   Timer {
     id: idleBlankTimer
-    interval: root.blankDelay
+    interval: root.phasedPower ? Number(root.phasedPower.offMs || 60000) : root.blankDelay
     repeat: false
     property double armedAt: 0
     onTriggered: {
@@ -2701,7 +2771,7 @@ echo "$out"
   }
 
   onAuthenticatingPasswordChanged: {
-    if (!lockRequested) return
+    if (!lockRequested || phasedPower) return
     if (authenticatingPassword) idleBlankTimer.stop()
     else armBlankTimer()
   }

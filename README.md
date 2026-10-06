@@ -462,3 +462,25 @@ the launcher and menu entries — goes through `extras/safe-paths.sh`: the targe
 `$HOME` behind a chain of real, user-owned directories (a symlink anywhere in it stops the
 script), and a file is replaced by writing a temporary next to it and renaming it into place.
 Use `safe_dir` and `put_file` from there rather than `mkdir -p`, `cp` or `>` when adding one.
+
+### Per-output locked idle power (fork)
+
+The plugin entry in `shell.json` optionally accepts:
+`"phasedPower": {"main":"DP-5","sides":["DP-4","DP-6"],"offMs":60000,"dimMs":300000}`.
+This overrides the legacy all-output blanking behavior. Main DPMS turns off after
+one minute; side-monitor DDC brightness reaches zero after five minutes total
+and stays there without a repeating timer. Compositor input activity restores
+power/original brightness and restarts both deadlines. QML pointer geometry
+changes and authentication retries do not wake outputs in this mode. Unlock
+also restores power. Requires Python 3, ddcutil, accessible I2C devices and
+Hyprland's Lua per-monitor DPMS dispatcher (verified against v0.56.2).
+Connector names are configured; DDC bus numbers are discovered dynamically.
+Brightness is saved before dimming under `$XDG_RUNTIME_DIR/lock-explorer-power/`.
+Before disabling/removing or restarting the shell, unlock normally to restore
+brightness, or run `python3 display-power.py wake DP-5 DP-4 DP-6` from this
+checkout in the desktop session. Removing `phasedPower` returns to legacy
+blanking; do this only while unlocked. Other display-power daemons conflict.
+Tests: `python3 -m unittest discover -s tests -p 'test_*.py'` and
+`node --test tests/*.cjs`. Physical five-minute timing, input wake, suspend and
+hotplug require desktop acceptance; hardware failures are logged, not retried
+in a tight loop.
