@@ -483,7 +483,13 @@ changes and authentication retries do not wake outputs in this mode. Unlock
 also restores power. Requires Python 3, ddcutil, accessible I2C devices and
 Hyprland's Lua per-monitor DPMS dispatcher (verified against v0.56.2).
 Connector names are configured; DDC bus numbers are discovered dynamically.
-Brightness is saved before dimming under `$XDG_RUNTIME_DIR/lock-explorer-power/`.
+Brightness is saved atomically and fsynced before dimming under
+`${XDG_STATE_HOME:-~/.local/state}/omarchy/lock-explorer-power/`. This survives
+logout/reboot: monitors may retain brightness 0 after power loss while runtime
+directories disappear. Legacy runtime restore data is migrated when available.
+On startup, once the compositor lock state is known to be unlocked, the service
+restores saved brightness automatically, with at most five bounded attempts.
+Failed/missing-output restores retain their saved values for later recovery.
 Before disabling/removing or restarting the shell, unlock normally to restore
 brightness, or run `python3 display-power.py wake DP-5 DP-4 DP-6` from this
 checkout in the desktop session. Removing `phasedPower` returns to legacy

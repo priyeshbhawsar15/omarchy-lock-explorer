@@ -145,6 +145,21 @@ Item {
       Qt.callLater(root.flushPowerPhase)
     }
   }
+  // Recover persisted pre-dim brightness after a reboot or shell crash, but
+  // only once the compositor lock state is known and the session is unlocked.
+  Timer {
+    id: powerRecoveryTimer
+    interval: 2000
+    repeat: true
+    property int remaining: 5
+    running: !!root.phasedPower && root.strandedLockResolved && !root.strandedLock
+      && !root.lockRequested && !root.locked && root.appliedPowerPhase === ""
+      && remaining > 0
+    onTriggered: {
+      remaining -= 1
+      root.setPowerPhase("wake")
+    }
+  }
   // Compositor input idle, not MouseArea coordinate changes: output power
   // transitions can synthesize pointer changes without physical activity.
   IdleMonitor {

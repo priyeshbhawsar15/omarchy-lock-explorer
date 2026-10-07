@@ -73,6 +73,45 @@ class PowerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'expected 0'):
                 power.set_brightness('14', 0)
 
+    def test_persistent_restore_after_fresh_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'brightness.json'
+            with patch.object(power, 'buses', return_value={'DP-4': '14', 'DP-6': '16'}), patch.object(power, 'brightness', side_effect=[73, 91]), patch.object(power, 'set_brightness'):
+                power.apply('dim', 'DP-5', ['DP-4', 'DP-6'], state)
+            fresh = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fresh)
+            with patch.object(fresh, 'buses', return_value={'DP-4': '14', 'DP-6': '16'}), patch.object(fresh, 'run'), patch.object(fresh, 'set_brightness') as restore:
+                fresh.apply('wake', 'DP-5', ['DP-4', 'DP-6'], state)
+                self.assertEqual(restore.call_args_list, [call('14', 73), call('16', 91)])
+                self.assertFalse(state.exists())
+
+    def test_runtime_state_migration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'persistent.json'
+            legacy = Path(directory) / 'legacy.json'
+            legacy.write_text('{"DP-4": 73}')
+            power.migrate_state(state, legacy)
+            self.assertEqual(json.loads(state.read_text()), {'DP-4': 73})
+            self.assertFalse(legacy.exists())
+            self.assertFalse(state.with_suffix('.tmp').exists())
+
+    def test_migration_never_overwrites_existing_restore_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'persistent.json'
+            legacy = Path(directory) / 'legacy.json'
+            state.write_text('{"DP-4": 73}')
+            legacy.write_text('{"DP-4": 0}')
+            power.migrate_state(state, legacy)
+            self.assertEqual(json.loads(state.read_text()), {'DP-4': 73})
+
+    def test_failed_restore_preserves_values_for_next_attempt(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(power, 'buses', return_value={'DP-4': '14'}), patch.object(power, 'run'), patch.object(power, 'set_brightness', side_effect=ValueError('readback failed')):
+            state = Path(directory) / 'persistent.json'
+            state.write_text('{"DP-4": 73}')
+            with self.assertRaises(RuntimeError):
+                power.apply('wake', 'DP-5', ['DP-4'], state)
+            self.assertEqual(json.loads(state.read_text()), {'DP-4': 73})
+
     def test_malformed_brightness_is_not_success(self):
         with patch.object(power, 'run', return_value='invalid'):
             with self.assertRaises(ValueError):

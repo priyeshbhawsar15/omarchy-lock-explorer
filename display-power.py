@@ -55,6 +55,26 @@ def set_brightness(bus, value):
         raise ValueError(f"Brightness readback is {actual}, expected {value} on bus {bus}")
 
 
+def save_state(state, saved):
+    temporary = state.with_suffix('.tmp')
+    with temporary.open('w') as output:
+        json.dump(saved, output)
+        output.flush()
+        os.fsync(output.fileno())
+    temporary.replace(state)
+    directory_fd = os.open(state.parent, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def migrate_state(state, legacy):
+    if not state.exists() and legacy.exists():
+        save_state(state, json.loads(legacy.read_text()))
+        legacy.unlink()
+
+
 def apply(phase, main, sides, state):
     if phase == "off":
         run("hyprctl", "dispatch", 'hl.dsp.dpms({ action = "disable", monitor = ' + json.dumps(main) + ' })')
@@ -74,13 +94,13 @@ def apply(phase, main, sides, state):
                 if phase == "dim":
                     if monitor not in saved:
                         saved[monitor] = brightness(bus)
-                        # Persist before dimming so recovery survives a shell restart.
-                        state.write_text(json.dumps(saved))
+                        # Persist before dimming so recovery survives reboot too.
+                        save_state(state, saved)
                     set_brightness(bus, 0)
                 else:
                     set_brightness(bus, saved[monitor])
                     del saved[monitor]
-                    state.write_text(json.dumps(saved))
+                    save_state(state, saved)
             except (subprocess.SubprocessError, OSError, ValueError) as error:
                 # One monitor failing must not prevent the other from dimming.
                 errors.append(f"{monitor}: {error}")
@@ -94,8 +114,12 @@ if __name__ == "__main__":
     phase, main, *sides = sys.argv[1:]
     if phase not in ("off", "dim", "wake"):
         raise SystemExit("Expected off, dim or wake")
-    directory = Path(os.environ["XDG_RUNTIME_DIR"]) / "lock-explorer-power"
-    directory.mkdir(mode=0o700, exist_ok=True)
+    directory = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "omarchy/lock-explorer-power"
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (directory / "mutex").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        apply(phase, main, sides, directory / "brightness.json")
+        state = directory / "brightness.json"
+        runtime = os.environ.get("XDG_RUNTIME_DIR")
+        if runtime:
+            migrate_state(state, Path(runtime) / "lock-explorer-power/brightness.json")
+        apply(phase, main, sides, state)
