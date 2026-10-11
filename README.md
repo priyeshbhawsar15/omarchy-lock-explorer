@@ -1,5 +1,30 @@
 # Lock Screen Explorer
 
+### Monitor timeouts and black tint (personal fork)
+
+Open **Settings → Monitor timeouts and tint** in Lock Screen Explorer. Main
+and side monitor groups each have a timeout (1–3600 seconds) and a black-tint
+slider (0–100%). Timeouts are independent and measured from locking or the
+last input activity. Changing these controls resets both countdowns while
+locked. 0% leaves the wallpaper unobscured; 1–99% draws a black overlay without
+changing hardware brightness; 100% powers that group off through Hyprland
+DPMS and pauses its lock video. Input activity or unlocking wakes the outputs,
+removes the overlays and resets the deadlines. Other settings, including
+wallpaper rotation, do not reset the countdowns.
+
+Settings persist in the plugin's `phasedPower` object in
+`~/.config/omarchy/shell.json`: `main`, `sides`, `mainTimeoutMs`,
+`sideTimeoutMs`, `mainTint`, `sideTint`. Personal setup defaults are DP-6 main
+(60 seconds, 100%) and DP-5/DP-4 sides (300 seconds, 90%). The setup installer
+migrates old `offMs`/`dimMs` timeouts, sets side tint to 90% once, and preserves
+subsequent user edits. Removing `phasedPower` returns to the legacy global
+blank-delay controls. Previous saved DDC brightness is still restored on wake
+or confirmed-unlocked startup; the percentage controls do not use DDC dimming.
+
+For scripts, use `omarchy-shell lock setDisplayPowerSetting <field> <value>`
+(timeout fields take milliseconds; tint fields take integer percentages).
+`omarchy-shell lock status` reports the settings and active power phase.
+
 ### Video wallpaper spanning (personal fork)
 
 Set `wallpaperSpanGroups` on this plugin's entry in `~/.config/omarchy/shell.json`,

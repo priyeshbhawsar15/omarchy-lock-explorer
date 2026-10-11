@@ -129,17 +129,26 @@ Item {
       if (list[i].id === pluginId) return list[i].phasedPower || null
     return null
   }
+  readonly property var displayPowerSettings: DisplayPower.settings(phasedPower)
+  readonly property string displayPowerSettingsKey: JSON.stringify({ enabled: !!phasedPower, settings: displayPowerSettings })
   property string powerPhase: "wake"
   property string appliedPowerPhase: ""
+  property bool powerWakePending: false
   function setPowerPhase(phase) {
+    if (phase === "wake" && (powerPhase !== "wake" || appliedPowerPhase !== "wake")) powerWakePending = true
     powerPhase = phase
     flushPowerPhase()
   }
   function flushPowerPhase() {
-    if (!phasedPower || phasedPowerProcess.running || appliedPowerPhase === powerPhase) return
-    phasedPowerProcess.command = ["python3", decodeURIComponent(Qt.resolvedUrl("display-power.py").toString().replace(/^file:\/\//, "")),
-      powerPhase, String(phasedPower.main || "DP-5")].concat(phasedPower.sides || ["DP-4", "DP-6"])
-    appliedPowerPhase = powerPhase
+    if (!phasedPower || phasedPowerProcess.running) return
+    var next = DisplayPower.nextPhase(powerPhase, appliedPowerPhase, powerWakePending)
+    if (!next) return
+    var command = ["python3", decodeURIComponent(Qt.resolvedUrl("display-power.py").toString().replace(/^file:\/\//, ""))]
+    phasedPowerProcess.command = next === "wake"
+      ? command.concat(["wake", displayPowerSettings.main]).concat(displayPowerSettings.sides)
+      : command.concat(["policy", next, JSON.stringify(displayPowerSettings)])
+    if (next === "wake") powerWakePending = false
+    appliedPowerPhase = next
     phasedPowerProcess.running = true
   }
   Process {
@@ -149,9 +158,13 @@ Item {
         root.logEvent("display-power-failed=" + exitCode)
         var failedPhase = root.appliedPowerPhase
         root.appliedPowerPhase = ""
-        // A queued wake must still run after a failed dim. Retry the same
-        // failed phase only on new activity, never in a failure spin-loop.
-        if (root.powerPhase !== failedPhase) Qt.callLater(root.flushPowerPhase)
+        // Keep failed wake as a barrier; retry on activity or a new deadline
+        // rather than spinning indefinitely on a failing display command.
+        if (failedPhase === "wake") {
+          root.powerWakePending = true
+          return
+        }
+        if (root.powerWakePending || root.powerPhase !== failedPhase) Qt.callLater(root.flushPowerPhase)
         return
       }
       Qt.callLater(root.flushPowerPhase)
@@ -184,13 +197,28 @@ Item {
   }
   Timer {
     id: sideDimTimer
-    interval: root.phasedPower ? Number(root.phasedPower.dimMs || 300000) : 300000
+    interval: root.displayPowerSettings.sideTimeoutMs
     property double armedAt: 0
     onTriggered: {
       if (Date.now() - armedAt > interval + 2000) {
         if (root.lockRequested) root.armBlankTimer()
-      } else if (root.lockRequested) root.setPowerPhase("dim")
+      } else if (root.lockRequested) root.setPowerPhase(DisplayPower.expire(root.powerPhase, "sides"))
     }
+  }
+
+  onDisplayPowerSettingsKeyChanged: {
+    if (lockRequested) armBlankTimer()
+  }
+
+  function setDisplayPowerSetting(field, value) {
+    if (!phasedPower || !shell || typeof shell.updateEntryInline !== "function") return false
+    var next = DisplayPower.updateSettings(phasedPower, field, value)
+    if (!next) return false
+    var current = pluginEntry()
+    current.phasedPower = next
+    writeEntry(current)
+    logEvent("display-power-setting=" + field + ":" + value)
+    return true
   }
 
   // When true the display stays powered while locked: the DPMS-off is skipped
@@ -2047,7 +2075,7 @@ echo "$out"
 
   function runBlank() {
     if (phasedPower) {
-      setPowerPhase("off")
+      setPowerPhase(DisplayPower.expire(powerPhase, "main"))
       return
     }
     if (keepDisplayOn) return
@@ -2356,7 +2384,8 @@ echo "$out"
           loadBackground: root.locked
           passwordText: root.enteredPassword
           videoPath: root.videoPath
-          videoPlaying: root.locked
+          videoPlaying: root.locked && DisplayPower.dimOverlayOpacity(root.displayPowerSettings,
+            root.powerPhase, lockSurface.screen ? lockSurface.screen.name : "", root.lockRequested) < 1
           unlockPlayback: root.unlockPlayback && root.showsInput(lockSurface.screen)
           clipSpeed: root.clipSpeed
           twelveHour: root.twelveHour
@@ -2380,7 +2409,7 @@ echo "$out"
         // Literal optical black is intentional, not a static theme palette:
         // themed backgrounds could brighten the image instead of dimming it.
         color: Qt.rgba(0, 0, 0, 1)
-        opacity: DisplayPower.dimOverlayOpacity(root.phasedPower, root.powerPhase,
+        opacity: DisplayPower.dimOverlayOpacity(root.phasedPower ? root.displayPowerSettings : null, root.powerPhase,
           lockSurface.screen ? lockSurface.screen.name : "", root.lockRequested)
         visible: opacity > 0
         // No input handlers: activity reaches the existing secure lock surface.
@@ -2752,7 +2781,7 @@ echo "$out"
 
   Timer {
     id: idleBlankTimer
-    interval: root.phasedPower ? Number(root.phasedPower.offMs || 60000) : root.blankDelay
+    interval: root.phasedPower ? root.displayPowerSettings.mainTimeoutMs : root.blankDelay
     repeat: false
     property double armedAt: 0
     onTriggered: {
@@ -2766,7 +2795,7 @@ echo "$out"
       // Only a password check in flight should hold the display up. The
       // fingerprint PAM stays armed for the whole lock, so gating on
       // `authenticating` here would keep the panel lit until unlock.
-      if (root.lockRequested && !root.authenticatingPassword) root.runBlank()
+      if (root.lockRequested && (root.phasedPower || !root.authenticatingPassword)) root.runBlank()
     }
   }
 
@@ -2873,6 +2902,8 @@ echo "$out"
       readonly property int blankDelay: root.blankDelay
       readonly property int defaultBlankDelay: root.defaultBlankDelay
       readonly property bool keepDisplayOn: root.keepDisplayOn
+      readonly property bool displayPowerEnabled: !!root.phasedPower
+      readonly property var displayPowerSettings: root.displayPowerSettings
       readonly property bool displayBlankingSuppressed: root.displayBlankingSuppressed
       readonly property bool fingerprintConfigured: root.fingerprintConfigured
       readonly property bool faceConfigured: root.faceConfigured
@@ -2938,6 +2969,7 @@ echo "$out"
       function setUnlockAnimation(name) { return root.setUnlockAnimation(name) }
       function setUnlockDuration(ms) { return root.setUnlockDuration(ms) }
       function setBlankDelay(ms) { return root.setBlankDelay(ms) }
+      function setDisplayPowerSetting(field, value) { return root.setDisplayPowerSetting(field, value) }
       function setKeepDisplayOn(on) { return root.setKeepDisplayOn(on) }
       function refreshBackground() { return root.refreshBackground() }
       function refreshFingerprintStatus() { return root.refreshFingerprintStatus() }
@@ -3046,6 +3078,8 @@ echo "$out"
         blankMs: root.blankDelay,
         keepDisplayOn: root.keepDisplayOn,
         displayBlankingSuppressed: root.displayBlankingSuppressed,
+        displayPowerSettings: root.phasedPower ? root.displayPowerSettings : null,
+        powerPhase: root.powerPhase,
         unlocking: root.unlocking,
         clipDesign: root.designHasClip,
         clipUnlocking: root.clipUnlocking,
@@ -3095,6 +3129,10 @@ echo "$out"
 
     function setBlankDelay(value: string): string {
       return root.setBlankDelay(value) ? "ok" : "invalid-value"
+    }
+
+    function setDisplayPowerSetting(field: string, value: string): string {
+      return root.setDisplayPowerSetting(field, value) ? "ok" : "invalid-value"
     }
 
     function boot(): string {

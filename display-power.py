@@ -110,10 +110,25 @@ def apply(phase, main, sides, state):
         raise RuntimeError("; ".join(errors))
 
 
+def apply_policy(config, phase):
+    """Only 100% tint uses DPMS; partial tint is drawn on the lock surface."""
+    targets = []
+    if phase in ("main", "both") and config["mainTint"] == 100:
+        targets.append(config["main"])
+    if phase in ("sides", "both") and config["sideTint"] == 100:
+        targets.extend(config["sides"])
+    errors = []
+    for monitor in dict.fromkeys(targets):
+        try:
+            run("hyprctl", "dispatch", 'hl.dsp.dpms({ action = "disable", monitor = ' + json.dumps(monitor) + ' })')
+        except (subprocess.SubprocessError, OSError) as error:
+            errors.append(f"{monitor}: {error}")
+    if errors:
+        raise RuntimeError("; ".join(errors))
+
+
 if __name__ == "__main__":
-    phase, main, *sides = sys.argv[1:]
-    if phase not in ("off", "dim", "wake"):
-        raise SystemExit("Expected off, dim or wake")
+    action = sys.argv[1]
     directory = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "omarchy/lock-explorer-power"
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (directory / "mutex").open("w") as lock:
@@ -122,4 +137,13 @@ if __name__ == "__main__":
         runtime = os.environ.get("XDG_RUNTIME_DIR")
         if runtime:
             migrate_state(state, Path(runtime) / "lock-explorer-power/brightness.json")
-        apply(phase, main, sides, state)
+        if action == "policy":
+            phase, raw_config = sys.argv[2:]
+            if phase not in ("main", "sides", "both"):
+                raise SystemExit("Expected main, sides or both")
+            apply_policy(json.loads(raw_config), phase)
+        else:
+            phase, main, *sides = sys.argv[1:]
+            if phase not in ("off", "dim", "wake"):
+                raise SystemExit("Expected off, dim, wake or policy")
+            apply(phase, main, sides, state)

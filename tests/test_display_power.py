@@ -12,6 +12,32 @@ spec.loader.exec_module(power)
 
 
 class PowerTests(unittest.TestCase):
+    def test_policy_powers_off_only_expired_groups_at_100_percent(self):
+        config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 40, 'sideTint': 100}
+        with patch.object(power, 'run') as run:
+            power.apply_policy(config, 'main')
+            run.assert_not_called()
+            power.apply_policy(config, 'sides')
+            self.assertEqual(run.call_args_list, [
+                call('hyprctl', 'dispatch', 'hl.dsp.dpms({ action = "disable", monitor = "DP-5" })'),
+                call('hyprctl', 'dispatch', 'hl.dsp.dpms({ action = "disable", monitor = "DP-4" })')])
+
+    def test_policy_partial_tint_does_not_change_hardware_brightness(self):
+        with patch.object(power, 'run') as run:
+            power.apply_policy({'main': 'DP-6', 'sides': ['DP-5'], 'mainTint': 0, 'sideTint': 90}, 'both')
+            run.assert_not_called()
+
+    def test_failed_dpms_still_attempts_other_side(self):
+        with patch.object(power, 'run', side_effect=[subprocess.TimeoutExpired('hyprctl', 20), '']) as run:
+            with self.assertRaisesRegex(RuntimeError, 'DP-5'):
+                power.apply_policy({'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 100, 'sideTint': 100}, 'sides')
+            self.assertEqual(len(run.call_args_list), 2)
+
+    def test_main_and_sides_can_both_power_off(self):
+        with patch.object(power, 'run') as run:
+            power.apply_policy({'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 100, 'sideTint': 100}, 'both')
+            self.assertEqual(len(run.call_args_list), 3)
+
     def test_connector_mapping_skips_invalid(self):
         text = 'Display 1\n I2C bus: /dev/i2c-14\n DRM connector: card2-DP-4\n\nInvalid display\n I2C bus: /dev/i2c-18\n DRM connector: card2-DP-4\n\nDisplay 2\n I2C bus: /dev/i2c-16\n DRM connector: card2-DP-6\n'
         with patch.object(power, 'run', return_value=text):

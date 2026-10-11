@@ -1345,6 +1345,15 @@ Item {
               visible: root.mainTab === "settings"
               spacing: Style.space(10)
 
+              DisplayPowerSettings {
+                width: parent.width
+                visible: root.service && root.service.displayPowerEnabled
+                settings: root.service ? root.service.displayPowerSettings : ({})
+                onSettingEdited: function(field, value) {
+                  if (root.service) root.service.setDisplayPowerSetting(field, value)
+                }
+              }
+
               Column {
                 spacing: Style.space(2)
                 Repeater {
@@ -1522,7 +1531,7 @@ Item {
               // Never keeps it powered for the whole lock: video designs keep
               // playing and slow monitors are never re-blanked mid-wake.
               Row {
-                visible: true
+                visible: !(root.service && root.service.displayPowerEnabled)
                 spacing: Style.space(6)
 
                 Text {
@@ -1627,6 +1636,7 @@ Item {
                 text: root.keepDisplayOn
                       ? "The lock screen stays lit for the whole lock: video designs keep playing."
                       : "The lock screen stays lit, then the display powers down."
+                visible: !(root.service && root.service.displayPowerEnabled)
                 color: root.muted
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
