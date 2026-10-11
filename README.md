@@ -1,5 +1,16 @@
 # Lock Screen Explorer
 
+### Video wallpaper spanning (personal fork)
+
+Set `wallpaperSpanGroups` on this plugin's entry in `~/.config/omarchy/shell.json`,
+for example `"wallpaperSpanGroups": [["DP-5", "DP-4"]]`. Only those connected
+outputs share one video canvas. Other monitors and Explorer previews display
+the complete video independently. The canvas uses actual logical monitor
+positions and sizes, respecting portrait orientation and scaling; group order
+does not reverse physical placement. If a companion disconnects, the remaining
+output displays the complete video. Set `[]` to disable spanning. This changes
+cropping only; the selected lock video and its rotation remain unchanged.
+
 A few lock screen designs for Omarchy 4 and a picker to preview and switch between them.
 Colors and fonts come from your Omarchy theme.
 

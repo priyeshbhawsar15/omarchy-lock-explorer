@@ -1,7 +1,9 @@
 import QtQuick
 import QtQuick.Effects
 import QtMultimedia
+import Quickshell
 import qs.Commons
+import "../WallpaperSpan.js" as WallpaperSpan
 
 Item {
   id: wall
@@ -21,10 +23,10 @@ Item {
   readonly property bool showing: player.hasVideo && (player.playbackState === MediaPlayer.PlayingState || player.playbackState === MediaPlayer.PausedState)
 
   readonly property string screenName: lock && lock.screenName ? String(lock.screenName) : ""
-  readonly property var spanGroup: ["DP-6", "DP-4"]
-  readonly property int screenIndex: spanGroup.indexOf(screenName)
-  readonly property bool isSpanned: screenIndex >= 0 && spanGroup.length > 1
-  readonly property int totalScreens: isSpanned ? spanGroup.length : 1
+  readonly property var viewport: WallpaperSpan.viewport(screenName,
+    Quickshell.screens.map(function(s) {
+      return { name: s.name, x: s.x, y: s.y, width: s.width, height: s.height }
+    }), lock ? lock.wallpaperSpanGroups : [])
 
   Rectangle {
     anchors.fill: parent
@@ -84,9 +86,10 @@ Item {
 
     VideoOutput {
       id: output
-      width: wall.isSpanned ? parent.width * wall.totalScreens : parent.width
-      height: parent.height
-      x: wall.isSpanned ? -parent.width * wall.screenIndex : 0
+      width: parent.width * wall.viewport.width
+      height: parent.height * wall.viewport.height
+      x: parent.width * wall.viewport.x
+      y: parent.height * wall.viewport.y
       fillMode: VideoOutput.PreserveAspectCrop
     }
   }

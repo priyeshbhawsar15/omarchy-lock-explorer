@@ -31,6 +31,7 @@ Item {
   property bool unlockPlayback: false
   property real clipSpeed: 1
   property string screenName: ""
+  property var wallpaperSpanGroups: []
   // 12-hour clocks with AM/PM, see `omarchy-shell lock setClockFormat`.
   property bool twelveHour: false
 
@@ -95,6 +96,7 @@ Item {
     if (it.clipSpeed !== undefined) it.clipSpeed = Qt.binding(function() { return host.clipSpeed })
     if (it.twelveHour !== undefined) it.twelveHour = Qt.binding(function() { return host.twelveHour })
     if (it.screenName !== undefined) it.screenName = Qt.binding(function() { return host.screenName })
+    if (it.wallpaperSpanGroups !== undefined) it.wallpaperSpanGroups = Qt.binding(function() { return host.wallpaperSpanGroups })
   }
 
   // Built-in designs come through the Loader; it also carries the Classic

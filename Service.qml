@@ -60,6 +60,18 @@ Item {
   }
   readonly property string inputMonitor: inputMonitorOverride.length > 0 ? inputMonitorOverride : configuredInputMonitor
 
+  // Only explicitly grouped outputs share a video; all others show it whole.
+  readonly property var wallpaperSpanGroups: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && Array.isArray(entry.wallpaperSpanGroups))
+        return entry.wallpaperSpanGroups
+    }
+    return []
+  }
+
   // How the lock screen leaves the screen when the password checks out. Off by
   // default, the unlock stays instant until it is turned on. Saved on the
   // plugin entry as `unlock` and `unlockMs`.
@@ -2349,6 +2361,7 @@ echo "$out"
           clipSpeed: root.clipSpeed
           twelveHour: root.twelveHour
           screenName: lockSurface.screen ? lockSurface.screen.name : ""
+          wallpaperSpanGroups: root.wallpaperSpanGroups
           onUnlockFinished: root.releaseLock()
           onPasswordTextEdited: function(password) { root.enteredPassword = password }
           onSubmitPassword: function(password) { root.submitPassword(password) }

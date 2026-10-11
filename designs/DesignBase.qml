@@ -26,6 +26,7 @@ Item {
   property bool loadBackground: true
   property string passwordText: ""
   property string screenName: ""
+  property var wallpaperSpanGroups: []
 
   // Set with `omarchy-shell lock setVideo`. Designs show it with VideoWallpaper,
   // which keeps the still wallpaper underneath when there is none. videoPlaying
