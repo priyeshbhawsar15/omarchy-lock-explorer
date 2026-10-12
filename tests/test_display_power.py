@@ -12,6 +12,76 @@ spec.loader.exec_module(power)
 
 
 class PowerTests(unittest.TestCase):
+    def test_hardware_off_persists_wake_addresses_before_cutting_ddc(self):
+        config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 100, 'sideTint': 100,
+                  'ddcPowerOffMonitors': ['DP-5', 'DP-4']}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'power.json'
+            off = []
+            def fake_run(*args):
+                if args[0] == 'ddcutil':
+                    self.assertEqual(args[3:], ('--noverify', 'setvcp', 'D6', '5'))
+                    saved = json.loads(state.read_text())
+                    self.assertIn(args[2], saved.values())
+                    off.append(args[2])
+                return ''
+            with patch.object(power, 'buses', return_value={'DP-4': '14', 'DP-5': '15'}), patch.object(power, 'run', side_effect=fake_run):
+                power.apply_policy(config, 'sides', state)
+            self.assertEqual(off, ['15', '14'])
+            self.assertEqual(json.loads(state.read_text()), {'DP-5': '15', 'DP-4': '14'})
+
+    def test_hardware_wake_uses_saved_buses_without_probing_off_monitors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'brightness.json'
+            hardware = Path(directory) / 'power.json'
+            hardware.write_text('{"DP-5":"15","DP-4":"14"}')
+            modes = {'15': 5, '14': 5}
+            def fake_run(*args):
+                if args[0] == 'hyprctl':
+                    return ''
+                bus = args[2]
+                if 'setvcp' in args:
+                    self.assertEqual(args[3:], ('--skip-ddc-checks', '--noverify', 'setvcp', 'D6', '1'))
+                    modes[bus] = 1
+                    return ''
+                return 'VCP D6 SNC x%02x' % modes[bus]
+            with patch.object(power, 'buses', side_effect=AssertionError('must not probe powered-off displays')), patch.object(power, 'run', side_effect=fake_run):
+                power.apply('wake', 'DP-6', ['DP-5', 'DP-4'], state)
+            self.assertEqual(modes, {'15': 1, '14': 1})
+            self.assertFalse(hardware.exists())
+
+    def test_failed_hardware_wake_retains_only_failed_output_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'brightness.json'
+            hardware = Path(directory) / 'power.json'
+            hardware.write_text('{"DP-5":"15","DP-4":"14"}')
+            def fake_run(*args):
+                if args[0] == 'ddcutil' and args[2] == '15':
+                    raise subprocess.CalledProcessError(1, args)
+                return 'VCP D6 SNC x01' if 'getvcp' in args else ''
+            with patch.object(power, 'run', side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, 'DP-5'):
+                    power.apply('wake', 'DP-6', ['DP-5', 'DP-4'], state)
+            self.assertEqual(json.loads(hardware.read_text()), {'DP-5': '15'})
+
+    def test_hardware_off_failure_still_blanks_and_attempts_other_output(self):
+        config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 100, 'sideTint': 100,
+                  'ddcPowerOffMonitors': ['DP-5', 'DP-4']}
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / 'power.json'
+            attempted = []
+            def fake_run(*args):
+                attempted.append(args)
+                if args[0] == 'ddcutil' and args[2] == '15':
+                    raise subprocess.CalledProcessError(1, args)
+                return ''
+            with patch.object(power, 'buses', return_value={'DP-5': '15', 'DP-4': '14'}), patch.object(power, 'run', side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, 'DP-5'):
+                    power.apply_policy(config, 'sides', state)
+            self.assertEqual(sum(a[0] == 'hyprctl' for a in attempted), 2)
+            self.assertIn(('ddcutil', '--bus', '14', '--noverify', 'setvcp', 'D6', '5'), attempted)
+            self.assertEqual(json.loads(state.read_text()), {'DP-5': '15', 'DP-4': '14'})
+
     def test_policy_powers_off_only_expired_groups_at_100_percent(self):
         config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 40, 'sideTint': 100}
         with patch.object(power, 'run') as run:

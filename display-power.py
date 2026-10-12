@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import fcntl
+import time
 
 
 def run(*args):
@@ -75,14 +76,44 @@ def migrate_state(state, legacy):
         legacy.unlink()
 
 
+def restore_hardware_power(state):
+    if not state.exists():
+        return []
+    saved = json.loads(state.read_text())
+    errors = []
+    for monitor, bus in list(saved.items()):
+        try:
+            # Hard-off monitors cannot answer detect's initial DDC probes.
+            # Use the address saved before power-off and send wake directly.
+            run("ddcutil", "--bus", bus, "--skip-ddc-checks", "--noverify", "setvcp", "D6", "1")
+            for attempt in range(3):
+                try:
+                    response = run("ddcutil", "--bus", bus, "getvcp", "D6", "--terse")
+                    if re.search(r"VCP D6 SNC x0*1\b", response):
+                        break
+                    raise ValueError(f"Monitor did not return to hardware power-on: {response!r}")
+                except (subprocess.SubprocessError, OSError, ValueError):
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.3)
+            del saved[monitor]
+            save_state(state, saved)
+        except (subprocess.SubprocessError, OSError, ValueError) as error:
+            errors.append(f"{monitor}: hardware wake failed: {error}")
+    if not saved:
+        state.unlink()
+    return errors
+
+
 def apply(phase, main, sides, state):
     if phase == "off":
         run("hyprctl", "dispatch", 'hl.dsp.dpms({ action = "disable", monitor = ' + json.dumps(main) + ' })')
         return
     saved = json.loads(state.read_text()) if state.exists() else {}
+    errors = []
     if phase == "wake":
         run("hyprctl", "dispatch", 'hl.dsp.dpms({ action = "enable" })')
-    errors = []
+        errors.extend(restore_hardware_power(state.with_name("power.json")))
     if phase == "dim" or saved:
         available = buses()
         for monitor in sides if phase == "dim" else list(saved):
@@ -110,15 +141,37 @@ def apply(phase, main, sides, state):
         raise RuntimeError("; ".join(errors))
 
 
-def apply_policy(config, phase):
-    """Only 100% tint uses DPMS; partial tint is drawn on the lock surface."""
+def apply_policy(config, phase, power_state=None):
+    """100% powers outputs off; opted-in monitors also get hardware DDC off."""
     targets = []
     if phase in ("main", "both") and config["mainTint"] == 100:
         targets.append(config["main"])
     if phase in ("sides", "both") and config["sideTint"] == 100:
         targets.extend(config["sides"])
+    hardware_targets = set(targets).intersection(config.get("ddcPowerOffMonitors", []))
+    if hardware_targets and power_state is None:
+        raise ValueError("Hardware power-off requires persistent wake state")
+    saved = json.loads(power_state.read_text()) if power_state and power_state.exists() else {}
+    available = {}
     errors = []
+    if hardware_targets.difference(saved):
+        try:
+            available = buses()
+        except (subprocess.SubprocessError, OSError, ValueError) as error:
+            errors.append(f"hardware power bus detection failed: {error}")
     for monitor in dict.fromkeys(targets):
+        if monitor in hardware_targets and monitor not in saved:
+            try:
+                bus = available.get(monitor)
+                if not bus:
+                    raise ValueError("no accessible DDC bus for hardware power-off")
+                saved[monitor] = bus
+                # Persist first: even a timed-out write may have powered off.
+                save_state(power_state, saved)
+                # D6=5 is write-only; readback verification cannot work once off.
+                run("ddcutil", "--bus", bus, "--noverify", "setvcp", "D6", "5")
+            except (subprocess.SubprocessError, OSError, ValueError) as error:
+                errors.append(f"{monitor}: hardware power-off failed: {error}")
         try:
             run("hyprctl", "dispatch", 'hl.dsp.dpms({ action = "disable", monitor = ' + json.dumps(monitor) + ' })')
         except (subprocess.SubprocessError, OSError) as error:
@@ -141,7 +194,7 @@ if __name__ == "__main__":
             phase, raw_config = sys.argv[2:]
             if phase not in ("main", "sides", "both"):
                 raise SystemExit("Expected main, sides or both")
-            apply_policy(json.loads(raw_config), phase)
+            apply_policy(json.loads(raw_config), phase, directory / "power.json")
         else:
             phase, main, *sides = sys.argv[1:]
             if phase not in ("off", "dim", "wake"):

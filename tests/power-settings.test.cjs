@@ -3,6 +3,12 @@ const assert = require('node:assert/strict')
 const power = require('../DisplayPower.js')
 const config = { main: 'DP-6', sides: ['DP-5', 'DP-4'], mainTimeoutMs: 60000, sideTimeoutMs: 300000, mainTint: 100, sideTint: 90 }
 
+test('normalization forwards hardware-off outputs to the power helper', () => {
+  const settings = power.settings({...config, ddcPowerOffMonitors: ['DP-5', 'DP-4']})
+  assert.deepEqual(settings.ddcPowerOffMonitors, ['DP-5', 'DP-4'])
+  assert.deepEqual(power.settings(config).ddcPowerOffMonitors, [])
+})
+
 test('deadlines remain independent in either order', () => {
   assert.equal(power.expire('wake', 'sides'), 'sides')
   assert.equal(power.expire('sides', 'main'), 'both')

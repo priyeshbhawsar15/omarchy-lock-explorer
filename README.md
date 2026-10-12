@@ -25,6 +25,19 @@ For scripts, use `omarchy-shell lock setDisplayPowerSetting <field> <value>`
 (timeout fields take milliseconds; tint fields take integer percentages).
 `omarchy-shell lock status` reports the settings and active power phase.
 
+Some LCDs keep their backlight powered when only compositor DPMS is disabled.
+For those monitors, add their output names to `phasedPower.ddcPowerOffMonitors`.
+The personal setup enables this for the Lenovo sides (`DP-5` and `DP-4`). At
+100% tint, the helper saves each DDC bus in persistent `power.json` before
+sending the monitor's hardware-off command (VCP D6=5), then disables DPMS.
+On activity, unlock, disable/removal, or confirmed-unlocked startup, it enables
+DPMS and sends D6=1 directly to the saved bus, bypassing initial DDC probes
+that cannot reach a powered-off monitor. Wake readback must report on before
+that monitor's recovery record is removed. Failed outputs retain their record
+for retry and do not prevent another output from waking. Partial tint does
+not use hardware power commands. See the
+[ddcutil power-mode reference](https://www.ddcutil.com/vcpinfo_output/).
+
 ### Video wallpaper spanning (personal fork)
 
 Set `wallpaperSpanGroups` on this plugin's entry in `~/.config/omarchy/shell.json`,

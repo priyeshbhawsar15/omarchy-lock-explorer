@@ -31,7 +31,8 @@ function settings(config) {
     mainTimeoutMs: bounded(config.mainTimeoutMs, bounded(config.offMs, 60000, 1000, 3600000), 1000, 3600000),
     sideTimeoutMs: bounded(config.sideTimeoutMs, bounded(config.dimMs, 300000, 1000, 3600000), 1000, 3600000),
     mainTint: bounded(config.mainTint, 100, 0, 100),
-    sideTint: bounded(config.sideTint, legacyTint, 0, 100)
+    sideTint: bounded(config.sideTint, legacyTint, 0, 100),
+    ddcPowerOffMonitors: Array.isArray(config.ddcPowerOffMonitors) ? config.ddcPowerOffMonitors : []
   }
 }
 
