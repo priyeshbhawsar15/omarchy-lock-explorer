@@ -160,16 +160,18 @@ def apply_policy(config, phase, power_state=None):
         except (subprocess.SubprocessError, OSError, ValueError) as error:
             errors.append(f"hardware power bus detection failed: {error}")
     for monitor in dict.fromkeys(targets):
-        if monitor in hardware_targets and monitor not in saved:
+        if monitor in hardware_targets:
             try:
-                bus = available.get(monitor)
+                # A saved address is a wake-recovery journal, not evidence that
+                # the previous write succeeded. Reuse it on bounded retries.
+                bus = saved.get(monitor) or available.get(monitor)
                 if not bus:
                     raise ValueError("no accessible DDC bus for hardware power-off")
                 saved[monitor] = bus
                 # Persist first: even a timed-out write may have powered off.
                 save_state(power_state, saved)
                 # D6=5 is write-only; readback verification cannot work once off.
-                run("ddcutil", "--bus", bus, "--noverify", "setvcp", "D6", "5")
+                run("ddcutil", "--bus", bus, "--skip-ddc-checks", "--noverify", "setvcp", "D6", "5")
             except (subprocess.SubprocessError, OSError, ValueError) as error:
                 errors.append(f"{monitor}: hardware power-off failed: {error}")
         try:

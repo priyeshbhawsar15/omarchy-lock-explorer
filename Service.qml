@@ -134,7 +134,17 @@ Item {
   property string powerPhase: "wake"
   property string appliedPowerPhase: ""
   property bool powerWakePending: false
+  property int powerRetryCount: 0
+  Timer {
+    id: powerRetryTimer
+    interval: 2000
+    onTriggered: root.flushPowerPhase()
+  }
   function setPowerPhase(phase) {
+    if (phase !== powerPhase) {
+      powerRetryTimer.stop()
+      powerRetryCount = 0
+    }
     if (phase === "wake" && (powerPhase !== "wake" || appliedPowerPhase !== "wake")) powerWakePending = true
     powerPhase = phase
     flushPowerPhase()
@@ -165,8 +175,14 @@ Item {
           return
         }
         if (root.powerWakePending || root.powerPhase !== failedPhase) Qt.callLater(root.flushPowerPhase)
+        else if (root.powerRetryCount < 2) {
+          root.powerRetryCount++
+          powerRetryTimer.restart()
+        }
         return
       }
+      powerRetryTimer.stop()
+      root.powerRetryCount = 0
       Qt.callLater(root.flushPowerPhase)
     }
   }

@@ -20,7 +20,7 @@ class PowerTests(unittest.TestCase):
             off = []
             def fake_run(*args):
                 if args[0] == 'ddcutil':
-                    self.assertEqual(args[3:], ('--noverify', 'setvcp', 'D6', '5'))
+                    self.assertEqual(args[3:], ('--skip-ddc-checks', '--noverify', 'setvcp', 'D6', '5'))
                     saved = json.loads(state.read_text())
                     self.assertIn(args[2], saved.values())
                     off.append(args[2])
@@ -79,8 +79,13 @@ class PowerTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'DP-5'):
                     power.apply_policy(config, 'sides', state)
             self.assertEqual(sum(a[0] == 'hyprctl' for a in attempted), 2)
-            self.assertIn(('ddcutil', '--bus', '14', '--noverify', 'setvcp', 'D6', '5'), attempted)
+            self.assertIn(('ddcutil', '--bus', '14', '--skip-ddc-checks', '--noverify', 'setvcp', 'D6', '5'), attempted)
             self.assertEqual(json.loads(state.read_text()), {'DP-5': '15', 'DP-4': '14'})
+            # Persist-before-write must not suppress retries after an uncertain
+            # failure; powered-off buses cannot be rediscovered by probing.
+            with patch.object(power, 'buses', side_effect=AssertionError('must reuse saved buses')), patch.object(power, 'run') as retry:
+                power.apply_policy(config, 'sides', state)
+            self.assertEqual([c.args[2] for c in retry.call_args_list if c.args[0] == 'ddcutil'], ['15', '14'])
 
     def test_policy_powers_off_only_expired_groups_at_100_percent(self):
         config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 40, 'sideTint': 100}
