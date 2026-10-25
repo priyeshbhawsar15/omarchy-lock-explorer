@@ -59,9 +59,11 @@ class PowerTests(unittest.TestCase):
                 if args[0] == 'ddcutil' and args[2] == '15':
                     raise subprocess.CalledProcessError(1, args)
                 return 'VCP D6 SNC x01' if 'getvcp' in args else ''
-            with patch.object(power, 'run', side_effect=fake_run):
-                with self.assertRaisesRegex(RuntimeError, 'DP-5'):
-                    power.apply('wake', 'DP-6', ['DP-5', 'DP-4'], state)
+            with patch.object(power, 'run', side_effect=fake_run), patch('sys.stderr'):
+                power.apply('wake', 'DP-6', ['DP-5', 'DP-4'], state)
+                # Failed legacy DDC recovery must not keep Service.qml's wake
+                # barrier pending and prevent the next main/side deadline.
+                power.apply_policy({'main': 'DP-6', 'sides': [], 'mainTint': 100, 'sideTint': 100}, 'main')
             self.assertEqual(json.loads(hardware.read_text()), {'DP-5': '15'})
 
     def test_hardware_off_failure_still_blanks_and_attempts_other_output(self):
@@ -107,6 +109,13 @@ class PowerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'DP-5'):
                 power.apply_policy({'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 100, 'sideTint': 100}, 'sides')
             self.assertEqual(len(run.call_args_list), 2)
+
+    def test_dpms_only_main_deadline_does_not_depend_on_side_hardware(self):
+        config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'],
+                  'mainTint': 100, 'sideTint': 100, 'ddcPowerOffMonitors': []}
+        with patch.object(power, 'buses', side_effect=AssertionError('DDC must not run')), patch.object(power, 'run') as run:
+            power.apply_policy(config, 'main')
+        run.assert_called_once_with('hyprctl', 'dispatch', 'hl.dsp.dpms({ action = "disable", monitor = "DP-6" })')
 
     def test_main_and_sides_can_both_power_off(self):
         with patch.object(power, 'run') as run:

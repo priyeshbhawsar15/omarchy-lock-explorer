@@ -113,7 +113,11 @@ def apply(phase, main, sides, state):
     errors = []
     if phase == "wake":
         run("hyprctl", "dispatch", 'hl.dsp.dpms({ action = "enable" })')
-        errors.extend(restore_hardware_power(state.with_name("power.json")))
+        # DPMS wake succeeded. Legacy DDC recovery is best-effort: retain
+        # failed addresses, but never block the next locked DPMS deadline.
+        hardware_errors = restore_hardware_power(state.with_name("power.json"))
+        if hardware_errors:
+            print("; ".join(hardware_errors), file=sys.stderr)
     if phase == "dim" or saved:
         available = buses()
         for monitor in sides if phase == "dim" else list(saved):
