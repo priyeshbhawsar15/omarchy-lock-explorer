@@ -149,14 +149,24 @@ Item {
     powerPhase = phase
     flushPowerPhase()
   }
-  function flushPowerPhase() {
+  Timer {
+    id: powerReconcileTimer
+    interval: 5000
+    repeat: true
+    running: !!root.phasedPower && root.lockRequested && root.powerPhase !== "wake"
+      && !root.powerWakePending && root.appliedPowerPhase === root.powerPhase
+    onTriggered: root.flushPowerPhase(true)
+  }
+  function flushPowerPhase(reconcile) {
     if (!phasedPower || phasedPowerProcess.running) return
     var next = DisplayPower.nextPhase(powerPhase, appliedPowerPhase, powerWakePending)
+    var checkOnly = !next && reconcile === true && lockRequested && powerPhase !== "wake"
+    if (checkOnly) next = powerPhase
     if (!next) return
     var command = ["python3", decodeURIComponent(Qt.resolvedUrl("display-power.py").toString().replace(/^file:\/\//, ""))]
     phasedPowerProcess.command = next === "wake"
       ? command.concat(["wake", displayPowerSettings.main]).concat(displayPowerSettings.sides)
-      : command.concat(["policy", next, JSON.stringify(displayPowerSettings)])
+      : command.concat([checkOnly ? "reconcile" : "policy", next, JSON.stringify(displayPowerSettings)])
     if (next === "wake") powerWakePending = false
     appliedPowerPhase = next
     phasedPowerProcess.running = true

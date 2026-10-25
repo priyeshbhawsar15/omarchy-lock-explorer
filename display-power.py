@@ -186,6 +186,18 @@ def apply_policy(config, phase, power_state=None):
         raise RuntimeError("; ".join(errors))
 
 
+def reconcile_policy(config, phase, power_state=None):
+    """Reassert expired deadlines only for enabled outputs that woke up."""
+    monitors = json.loads(run("hyprctl", "-j", "monitors", "all"))
+    awake = {m["name"] for m in monitors
+             if not m.get("disabled", False) and m.get("dpmsStatus", False)}
+    config = dict(config)
+    if config["main"] not in awake:
+        config["mainTint"] = 0
+    config["sides"] = [name for name in config["sides"] if name in awake]
+    apply_policy(config, phase, power_state)
+
+
 if __name__ == "__main__":
     action = sys.argv[1]
     directory = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "omarchy/lock-explorer-power"
@@ -196,11 +208,12 @@ if __name__ == "__main__":
         runtime = os.environ.get("XDG_RUNTIME_DIR")
         if runtime:
             migrate_state(state, Path(runtime) / "lock-explorer-power/brightness.json")
-        if action == "policy":
+        if action in ("policy", "reconcile"):
             phase, raw_config = sys.argv[2:]
             if phase not in ("main", "sides", "both"):
                 raise SystemExit("Expected main, sides or both")
-            apply_policy(json.loads(raw_config), phase, directory / "power.json")
+            handler = reconcile_policy if action == "reconcile" else apply_policy
+            handler(json.loads(raw_config), phase, directory / "power.json")
         else:
             phase, main, *sides = sys.argv[1:]
             if phase not in ("off", "dim", "wake"):

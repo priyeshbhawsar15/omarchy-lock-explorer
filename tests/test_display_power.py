@@ -117,6 +117,25 @@ class PowerTests(unittest.TestCase):
             power.apply_policy(config, 'main')
         run.assert_called_once_with('hyprctl', 'dispatch', 'hl.dsp.dpms({ action = "disable", monitor = "DP-6" })')
 
+    def test_reconcile_only_reasserts_expired_awake_enabled_outputs(self):
+        config = {'main': 'DP-6', 'sides': ['DP-5', 'DP-4'],
+                  'mainTint': 100, 'sideTint': 100, 'ddcPowerOffMonitors': []}
+        scenarios = [
+            ('both', [{'name': 'DP-6', 'dpmsStatus': False}, {'name': 'DP-5', 'dpmsStatus': True}], ['DP-5']),
+            ('main', [{'name': 'DP-6', 'dpmsStatus': True}, {'name': 'DP-5', 'dpmsStatus': True}], ['DP-6']),
+            ('both', [{'name': 'DP-6', 'dpmsStatus': True}, {'name': 'DP-5', 'disabled': True, 'dpmsStatus': True}], ['DP-6']),
+            ('sides', [{'name': 'DP-6', 'dpmsStatus': True}, {'name': 'DP-4', 'dpmsStatus': False}], []),
+        ]
+        for phase, monitors, expected in scenarios:
+            with self.subTest(phase=phase, monitors=monitors):
+                def fake_run(*args):
+                    return json.dumps(monitors) if args[1] == '-j' else 'ok'
+                with patch.object(power, 'run', side_effect=fake_run) as run:
+                    power.reconcile_policy(config, phase)
+                commands = [c.args[2] for c in run.call_args_list if c.args[1] == 'dispatch']
+                self.assertEqual(commands, ['hl.dsp.dpms({ action = "disable", monitor = ' + json.dumps(name) + ' })' for name in expected])
+        self.assertEqual(config['sides'], ['DP-5', 'DP-4'])
+
     def test_main_and_sides_can_both_power_off(self):
         with patch.object(power, 'run') as run:
             power.apply_policy({'main': 'DP-6', 'sides': ['DP-5', 'DP-4'], 'mainTint': 100, 'sideTint': 100}, 'both')
