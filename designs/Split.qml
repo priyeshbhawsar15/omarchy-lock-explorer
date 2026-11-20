@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 
 DesignBase {
   id: lock
@@ -27,7 +28,7 @@ DesignBase {
     spacing: 4
     Text {
       text: lock.clock("HH:mm")
-      color: Color.lock.text
+      color: Commons.Color.lock.text
       font.family: Style.font.family
       font.pixelSize: Math.round(Style.font.baseSize * 8)
       font.weight: Font.DemiBold
@@ -36,8 +37,8 @@ DesignBase {
       layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Qt.rgba(0, 0, 0, 0.6); shadowBlur: 1.0; shadowVerticalOffset: 2 }
     }
     Text {
-      text: Qt.formatDate(lock.now, "dddd, d MMMM")
-      color: lock.withAlpha(Color.lock.text, 0.85)
+      text: lock.date("dddd, d MMMM")
+      color: lock.withAlpha(Commons.Color.lock.text, 0.85)
       font.family: Style.font.family
       font.pixelSize: Style.font.display
       layer.enabled: true
@@ -59,8 +60,8 @@ DesignBase {
       lock: lock
       blur: 1.0; dim: 0.2; vignette: false
     }
-    Rectangle { anchors.fill: parent; color: lock.withAlpha(Color.lock.background, 0.55) }
-    Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: lock.withAlpha(Color.lock.text, 0.14) }
+    Rectangle { anchors.fill: parent; color: lock.withAlpha(Commons.Color.lock.background, 0.55) }
+    Rectangle { anchors.left: parent.left; width: 1; height: parent.height; color: lock.withAlpha(Commons.Color.lock.text, 0.14) }
 
     Column {
       anchors.left: parent.left
@@ -74,7 +75,7 @@ DesignBase {
         width: 84
         fontSize: Math.round(Style.font.baseSize * 3)
         borderWidth: 3
-        borderColor: lock.withAlpha(Color.lock.text, 0.25)
+        borderColor: lock.withAlpha(Commons.Color.lock.text, 0.25)
         shadow: false
       }
 
@@ -82,14 +83,15 @@ DesignBase {
         spacing: 4
         Text {
           text: lock.greeting()
-          color: lock.withAlpha(Color.lock.text, 0.7)
+          color: lock.withAlpha(Commons.Color.lock.text, 0.7)
           font.family: Style.font.family
           font.pixelSize: Style.font.title
           font.letterSpacing: 2
         }
         Text {
-          text: lock.userName
-          color: Color.lock.text
+          text: lock.displayName
+          textFormat: Text.PlainText
+          color: Commons.Color.lock.text
           font.family: Style.font.family
           font.pixelSize: Style.font.displayLarge
           font.weight: Font.DemiBold
@@ -102,15 +104,16 @@ DesignBase {
         width: lock.fieldWidth
         height: 58
         textAlignment: TextInput.AlignLeft
-        placeholder: "Password"
+        placeholder: lock.tr("Password")
       }
 
       Text {
         opacity: lock.snapshotMode ? 0 : 1
         text: lock.failedAttempts > 0
-          ? lock.failedAttempts + " failed " + (lock.failedAttempts === 1 ? "attempt" : "attempts")
-          : (lock.fingerprintConfigured ? "󰆠  Touch the sensor or press Enter" : "Press Enter to unlock")
-        color: lock.failedAttempts > 0 ? Color.lock.textError : lock.withAlpha(Color.lock.text, 0.55)
+          ? lock.tr(lock.failedAttempts === 1 ? "1 failed attempt" : "%1 failed attempts").arg(lock.failedAttempts)
+          : (lock.fingerprintConfigured ? lock.fingerprintHint(lock.tr("󰆠  Touch the sensor or press Enter")) : lock.tr("Press Enter to unlock"))
+        textFormat: Text.PlainText
+        color: lock.failedAttempts > 0 ? Commons.Color.lock.textError : lock.withAlpha(Commons.Color.lock.text, 0.55)
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
         font.letterSpacing: 1
@@ -123,7 +126,8 @@ DesignBase {
       anchors.margins: lock.margin
       opacity: lock.snapshotMode ? 0 : 1
       text: "󰌾  " + lock.hostName
-      color: lock.withAlpha(Color.lock.text, 0.45)
+      textFormat: Text.PlainText
+      color: lock.withAlpha(Commons.Color.lock.text, 0.45)
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       font.letterSpacing: 2

@@ -17,6 +17,14 @@
 var MARKER = "designer:1:"
 var VERSION = 1
 var DEFAULT_NAME = "My Layout"
+// The corners of the base's chrome (media strip, owner message), 0 to 24 px.
+// A layout from before the setting has none and gets the base default.
+var DEFAULT_CORNERS = 6
+
+function clampCorners(v) {
+  var n = Math.round(Number(v))
+  return isFinite(n) ? Math.max(0, Math.min(24, n)) : DEFAULT_CORNERS
+}
 
 // ------------------------------------------------------------------ anchors
 
@@ -137,6 +145,33 @@ function textFields(extra) {
 // Every draggable piece. `group` buckets them in the palette, `sized` says
 // whether dragging a corner handle should resize it, `fill` marks the
 // full-screen backgrounds.
+// ttfx effects that suit a drawing: they finish on their own and read well
+// on block art. The names are ttfx's own, see `ttfx --help`.
+var TTFX_EFFECTS = [
+  { id: "decrypt", name: "Decrypt" },
+  { id: "beams", name: "Beams" },
+  { id: "burn", name: "Burn" },
+  { id: "laseretch", name: "Laser etch" },
+  { id: "expand", name: "Expand" },
+  { id: "slide", name: "Slide" },
+  { id: "wipe", name: "Wipe" },
+  { id: "scattered", name: "Scattered" },
+  { id: "spray", name: "Spray" },
+  { id: "pour", name: "Pour" },
+  { id: "rain", name: "Rain" },
+  { id: "print", name: "Print" },
+  { id: "bouncyballs", name: "Bouncy balls" },
+  { id: "bubbles", name: "Bubbles" },
+  { id: "blackhole", name: "Black hole" },
+  { id: "synthgrid", name: "Synth grid" },
+  { id: "swarm", name: "Swarm" },
+  { id: "unstable", name: "Unstable" },
+  { id: "errorcorrect", name: "Error correct" },
+  { id: "crumble", name: "Crumble" },
+  { id: "vhstape", name: "VHS tape" },
+  { id: "colorshift", name: "Color shift" }
+]
+
 var KINDS = {
   wallpaper: {
     name: "Wallpaper", group: "Background", glyph: "󰸉",
@@ -297,6 +332,85 @@ var KINDS = {
     ]
   },
 
+  weather: {
+    name: "Weather", group: "Live", glyph: "󰖐",
+    hint: "The weather now, from wttr.in for the place in Omarchy's weather settings",
+    spec: { unit: "c", icon: true, condition: true, place: false, size: 22, weight: 400, color: "text", alpha: 0.9, spacing: 0, align: "center", caps: false, shadow: true },
+    fields: textFields([
+      { key: "unit", type: "choice", label: "Unit", options: [
+        { id: "c", name: "Celsius" },
+        { id: "f", name: "Fahrenheit" }
+      ] },
+      { key: "icon", type: "bool", label: "Icon" },
+      { key: "condition", type: "bool", label: "Condition" },
+      { key: "place", type: "bool", label: "Place" }
+    ])
+  },
+  media: {
+    name: "Now playing", group: "Live", glyph: "󰝚",
+    hint: "The track that is playing, from any player on the desktop",
+    spec: { show: "both", icon: true, idle: "Nothing playing", size: 20, weight: 400, color: "text", alpha: 0.85, spacing: 0, align: "center", caps: false, shadow: true },
+    fields: textFields([
+      { key: "show", type: "choice", label: "Show", options: [
+        { id: "both", name: "Title and artist" },
+        { id: "title", name: "Title" },
+        { id: "artist", name: "Artist" }
+      ] },
+      { key: "icon", type: "bool", label: "Icon" },
+      { key: "idle", type: "text", label: "When nothing plays" }
+    ])
+  },
+  art: {
+    name: "Album art", group: "Live", glyph: "󰀥",
+    hint: "The cover of the track that is playing",
+    sized: true, square: true,
+    w: 200, h: 200,
+    spec: { radius: 16, alpha: 1, shadow: true, hideIdle: false },
+    fields: [
+      { key: "radius", type: "number", label: "Corner radius", min: 0, max: 200, step: 2 },
+      { key: "alpha", type: "slider", label: "Opacity", min: 0.05, max: 1, step: 0.05 },
+      { key: "shadow", type: "bool", label: "Drop shadow" },
+      { key: "hideIdle", type: "bool", label: "Hide when nothing plays" }
+    ]
+  },
+  battery: {
+    name: "Battery", group: "Live", glyph: "󰁹",
+    hint: "How full the battery is, and whether it is charging",
+    spec: { icon: true, state: true, hideWithout: false, size: 18, weight: 400, color: "text", alpha: 0.8, spacing: 0, align: "center", caps: false, shadow: false },
+    fields: textFields([
+      { key: "icon", type: "bool", label: "Icon" },
+      { key: "state", type: "bool", label: "Say when charging" },
+      { key: "hideWithout", type: "bool", label: "Hide without a battery" }
+    ])
+  },
+  system: {
+    name: "System info", group: "Live", glyph: "󰍛",
+    hint: "Uptime, memory in use, load or the kernel",
+    spec: { stat: "uptime", label: true, size: 16, weight: 400, color: "text", alpha: 0.7, spacing: 0, align: "center", caps: false, shadow: false },
+    fields: textFields([
+      { key: "stat", type: "choice", label: "Show", options: [
+        { id: "uptime", name: "Uptime" },
+        { id: "memory", name: "Memory" },
+        { id: "load", name: "Load" },
+        { id: "kernel", name: "Kernel" }
+      ] },
+      { key: "label", type: "bool", label: "Label" }
+    ])
+  },
+  month: {
+    name: "Month", group: "Live", glyph: "󰸗",
+    hint: "This month's calendar, with today marked",
+    spec: { size: 36, color: "text", alpha: 0.9, accent: "accent", title: true, weekdays: true },
+    fields: [
+      { key: "size", type: "number", label: "Cell size", min: 12, max: 120, step: 2 },
+      { key: "color", type: "color", label: "Color" },
+      { key: "alpha", type: "slider", label: "Opacity", min: 0.05, max: 1, step: 0.05 },
+      { key: "accent", type: "color", label: "Today" },
+      { key: "title", type: "bool", label: "Month name" },
+      { key: "weekdays", type: "bool", label: "Weekdays" }
+    ]
+  },
+
   panel: {
     name: "Panel", group: "Shapes", glyph: "󰝦",
     hint: "A rounded surface to sit things on",
@@ -324,19 +438,38 @@ var KINDS = {
     ]
   },
 
+  // Drawn in the designer's grid editor and animated by ttfx, the terminal
+  // text effects Omarchy ships. The drawing is block characters, so it is
+  // just text: it lives in the design file with everything else.
+  ttfx: {
+    name: "ttfx art", group: "Effects", glyph: "󰸴",
+    hint: "A drawing animated by ttfx — draw it in the grid editor",
+    spec: { art: "", effect: "decrypt", size: 14, color: "text", accent: "accent", rate: 60, margin: 1, replay: true },
+    fields: [
+      { key: "art", type: "art", label: "Drawing" },
+      { key: "effect", type: "choice", label: "Effect", options: TTFX_EFFECTS },
+      { key: "size", type: "number", label: "Cell size", min: 4, max: 80, step: 1 },
+      { key: "color", type: "color", label: "Color" },
+      { key: "accent", type: "color", label: "Accent" },
+      { key: "rate", type: "number", label: "Frames per second", min: 10, max: 240, step: 10 },
+      { key: "margin", type: "number", label: "Canvas margin", min: 0, max: 20, step: 1 },
+      { key: "replay", type: "bool", label: "Play again on a wrong password" }
+    ]
+  },
+
   custom: {
     name: "Custom QML", group: "Yours", glyph: "󰘦",
     hint: "Write the QML yourself — lock.now, lock.userName and the rest are in scope",
     sized: true,
     w: 300, h: 120,
-    spec: { qml: 'Text {\n  anchors.centerIn: parent\n  text: Qt.formatDate(lock.now, "dddd")\n  color: Color.lock.text\n  font.family: Style.font.family\n  font.pixelSize: 32\n}' },
+    spec: { qml: 'Text {\n  anchors.centerIn: parent\n  text: Qt.formatDate(lock.now, "dddd")\n  color: Commons.Color.lock.text\n  font.family: Style.font.family\n  font.pixelSize: 32\n}' },
     fields: [
       { key: "qml", type: "code", label: "QML" }
     ]
   }
 }
 
-var GROUPS = ["Background", "Text", "Input", "Media", "Shapes", "Yours"]
+var GROUPS = ["Background", "Text", "Input", "Media", "Live", "Shapes", "Effects", "Yours"]
 
 function kind(id) { return KINDS[id] || null }
 
@@ -382,7 +515,7 @@ function nextId(doc) {
 }
 
 function emptyDoc(name) {
-  return { v: VERSION, name: name || DEFAULT_NAME, nodes: [] }
+  return { v: VERSION, name: name || DEFAULT_NAME, corners: DEFAULT_CORNERS, nodes: [] }
 }
 
 // What a brand new design starts as: a wallpaper, the time, the date and a
@@ -407,15 +540,31 @@ function starterDoc(name) {
   return doc
 }
 
+// The name lands in a comment of the generated QML and each id after `id:`,
+// and both can come from a file or a pasted component: the name loses its
+// control characters, and an id has to be n<number>, unique, or gets one.
+function cleanName(name) {
+  var v = String(name || "").replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, " ").trim().substring(0, 80)
+  return v.length > 0 ? v : DEFAULT_NAME
+}
+
 function validate(doc) {
   if (!doc || typeof doc !== "object") return null
   if (!(doc.nodes instanceof Array)) return null
-  var out = { v: VERSION, name: String(doc.name || DEFAULT_NAME), nodes: [] }
+  var out = { v: VERSION, name: cleanName(doc.name), corners: clampCorners(doc.corners), nodes: [] }
+  var used = {}
+  var next = 1
   for (var i = 0; i < doc.nodes.length; i++) {
     var n = doc.nodes[i]
     if (!n || !KINDS[n.kind]) continue
+    var id = String(n.id || "")
+    if (!/^n[0-9]{1,6}$/.test(id) || used[id]) {
+      while (used["n" + next] || doc.nodes.some(function(o) { return o && String(o.id) === "n" + next })) next++
+      id = "n" + next
+    }
+    used[id] = true
     out.nodes.push({
-      id: String(n.id || ("n" + (i + 1))),
+      id: id,
       kind: String(n.kind),
       anchor: ANCHORS.indexOf(n.anchor) === -1 ? "center" : n.anchor,
       dx: Math.round(Number(n.dx) || 0),
@@ -444,8 +593,8 @@ function plainNode(n) {
   }
 }
 
-function docOf(nodes, name) {
-  var out = { v: VERSION, name: String(name || DEFAULT_NAME), nodes: [] }
+function docOf(nodes, name, corners) {
+  var out = { v: VERSION, name: String(name || DEFAULT_NAME), corners: clampCorners(corners), nodes: [] }
   for (var i = 0; i < (nodes || []).length; i++) out.nodes.push(plainNode(nodes[i]))
   return out
 }
@@ -520,6 +669,7 @@ function anchorLines(node, indent) {
 // layout comment above it is what the designer reads back; the code is
 // rewritten from it on every save.
 function generate(doc, pluginId) {
+  doc = validate(doc) || { name: DEFAULT_NAME, corners: 0, nodes: [] }
   var out = []
   var nodes = doc.nodes || []
   var inputNode = null
@@ -533,10 +683,12 @@ function generate(doc, pluginId) {
   out.push("import QtQuick")
   out.push("import QtQuick.Effects")
   out.push("import qs.Commons")
+  out.push("import qs.Commons as Commons")
   out.push('import "../plugins/' + pluginId + '/designs"')
   out.push("")
   out.push("DesignBase {")
   out.push("  id: lock")
+  out.push("  chromeRadius: " + clampCorners(doc.corners))
   out.push("  inputItem: " + (inputNode ? inputNode.id + ".inputItem" : "fallbackInput"))
   out.push("")
   out.push("  MouseArea {")

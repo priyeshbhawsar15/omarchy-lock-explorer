@@ -2,8 +2,10 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
 import "designs"
 import "Designer.js" as D
+import "ExplorerStrings.js" as UiText
 
 // The visual designer: a palette of pieces on the left, the lock screen at
 // its real size in the middle, and the settings for whatever is selected on
@@ -17,11 +19,14 @@ Item {
   id: designer
 
   property var service: null
+  // The explorer's language, which is the lock screen's (ExplorerStrings.js).
+  readonly property string language: service && service.language !== undefined ? String(service.language) : "en"
+  function tr(text) { return UiText.tr(designer.language, text) }
   property var design: null
   property string pluginId: "io.github.sirjul1337.lock-explorer"
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color accent: Color.accent
+  property color background: Commons.Color.menu.background
+  property color foreground: Commons.Color.menu.text
+  property color accent: Commons.Color.accent
   property string fontFamily: Style.font.menuFamily
   property real screenWidth: 1920
   property real screenHeight: 1080
@@ -38,6 +43,7 @@ Item {
   // announcement, the canvas is bound to its properties.
   property var nodes: []
   property string docName: D.DEFAULT_NAME
+  property int docCorners: D.DEFAULT_CORNERS
   property var selection: []
   property bool dirty: false
   property bool confirmDiscard: false
@@ -51,6 +57,17 @@ Item {
   // place when the explorer comes back.
   property string pendingFileKey: ""
   property bool namingComponent: false
+
+  // The grid editor behind the `art` field: `artGrid` is rows of booleans and
+  // the drawing itself is block characters, so it travels in the design file
+  // as ordinary text. BLOCK is U+2588, what ttfx paints as a solid cell.
+  readonly property string artBlock: "█"
+  property bool artEditing: false
+  property string artKey: ""
+  property var artGrid: []
+  property bool artPaint: true
+  readonly property int artCols: artGrid.length > 0 ? artGrid[0].length : 0
+  readonly property int artRows: artGrid.length
   property string hoverHint: ""
 
   readonly property var primary: selection.length === 0 ? null : nodeById(selection[selection.length - 1])
@@ -74,27 +91,38 @@ Item {
     })
   }
 
-  function currentDoc() { return D.docOf(designer.nodes, designer.docName) }
+  function currentDoc() { return D.docOf(designer.nodes, designer.docName, designer.docCorners) }
 
   function newNodeId() { return D.nextIdFrom(D.idsOf(designer.nodes)) }
 
   // -------------------------------------------------------------- the file
 
+  // Reads go through CappedFile (a plain file, a link to one is fine, at most
+  // 1 MiB); the FileView only writes, and never reads the file itself.
+  CappedFile {
+    id: reader
+    path: designer.path
+    allowLinks: true
+    maxBytes: 1048576
+    preload: false
+    onLoadFailed: designer.loadError = designer.tr("Cannot read %1").arg(designer.path)
+    onLoaded: designer.adopt(reader.text())
+  }
+
   FileView {
     id: file
     path: designer.path
+    preload: false
     watchChanges: false
     atomicWrites: true
     printErrors: false
     onSaved: {
-      designer.status = "Saved " + Qt.formatTime(new Date(), "HH:mm:ss")
+      designer.status = designer.tr("Saved %1").arg(Qt.formatTime(new Date(), "HH:mm:ss"))
       designer.dirty = false
       if (designer.service && typeof designer.service.reloadDesigns === "function")
         designer.service.reloadDesigns()
     }
-    onSaveFailed: function(error) { designer.status = "Save failed: " + error }
-    onLoadFailed: designer.loadError = "Cannot read " + designer.path
-    onLoaded: designer.adopt(file.text())
+    onSaveFailed: function(error) { designer.status = designer.tr("Save failed: %1").arg(error) }
   }
 
   onPathChanged: if (path.length > 0) load()
@@ -108,13 +136,14 @@ Item {
   function load() {
     loadError = ""
     status = ""
-    file.reload()
+    // After the bindings settle: the reader's path follows designer.path.
+    Qt.callLater(reader.reload)
   }
 
   function adopt(text) {
     var parsed = D.parse(text)
     if (!parsed) {
-      loadError = "This design was not made in the designer. Open it with the code editor instead."
+      loadError = designer.tr("This design was not made in the designer. Open it with the code editor instead.")
       return
     }
     loadError = ""
@@ -130,6 +159,7 @@ Item {
     var made = []
     for (var i = 0; i < plain.nodes.length; i++) made.push(makeNode(plain.nodes[i]))
     designer.docName = plain.name
+    designer.docCorners = D.clampCorners(plain.corners)
     designer.nodes = made
     designer.selection = []
     // Only once the canvas has let go of them.
@@ -140,14 +170,14 @@ Item {
   function save() {
     if (path.length === 0) return
     file.setText(D.generate(currentDoc(), pluginId))
-    status = "Saving…"
+    status = designer.tr("Saving…")
     confirmDiscard = false
   }
 
   function requestClose() {
     if (dirty && !confirmDiscard) {
       confirmDiscard = true
-      status = "Unsaved changes. Ctrl+S to save, Esc again to discard."
+      status = designer.tr("Unsaved changes. Ctrl+S to save, Esc again to discard.")
       return
     }
     closeRequested()
@@ -316,6 +346,9 @@ Item {
   function addNode(kindId, x, y) {
     var plain = D.newNode(kindId, newNodeId())
     if (!plain) return
+    // A ttfx piece with nothing drawn yet would be an empty canvas: start it
+    // on the branding logo, which is what it is usually there for.
+    if (kindId === "ttfx" && String(plain.spec.art || "").length === 0) plain.spec.art = artLogo.text
     pushUndo()
     var fill = D.isFill(plain)
     if (!fill) plain.anchor = D.anchorAt(x, y, screenWidth, screenHeight)
@@ -338,7 +371,7 @@ Item {
         designer.touch()
       })
     }
-    status = D.kindName(kindId) + " added"
+    status = designer.tr("%1 added").arg(designer.tr(D.kindName(kindId)))
   }
 
   function addComponent(comp, x, y) {
@@ -357,7 +390,7 @@ Item {
     syncNodes()
     select(ids)
     dirty = true
-    status = comp.name + " added"
+    status = designer.tr("%1 added").arg(comp.name)
   }
 
   function removeSelected() {
@@ -485,6 +518,106 @@ Item {
     touch()
   }
 
+  // ------------------------------------------------------------------- art
+
+  OmarchyLogo { id: artLogo }
+
+  function artRow(cols, fill) {
+    var row = []
+    for (var i = 0; i < cols; i++) row.push(!!fill)
+    return row
+  }
+
+  // Text -> grid. Anything that is not a space is a filled cell, so a logo
+  // drawn with any character comes in as blocks.
+  function artGridOf(text, minCols, minRows) {
+    var lines = String(text || "").replace(/\s+$/, "").split("
+")
+    var cols = minCols || 0
+    for (var i = 0; i < lines.length; i++) cols = Math.max(cols, lines[i].length)
+    cols = Math.max(8, cols)
+    var rows = Math.max(minRows || 0, lines.length, 4)
+    var grid = []
+    for (var r = 0; r < rows; r++) {
+      var row = artRow(cols, false)
+      var line = r < lines.length ? lines[r] : ""
+      for (var c = 0; c < line.length && c < cols; c++) row[c] = line.charAt(c) !== " "
+      grid.push(row)
+    }
+    return grid
+  }
+
+  function artTextOf(grid) {
+    var out = []
+    for (var r = 0; r < grid.length; r++) {
+      var line = ""
+      for (var c = 0; c < grid[r].length; c++) line += grid[r][c] ? designer.artBlock : " "
+      out.push(line.replace(/\s+$/, ""))
+    }
+    // Blank rows top and bottom are the canvas margin's job, not the drawing's.
+    while (out.length > 0 && out[0].length === 0) out.shift()
+    while (out.length > 0 && out[out.length - 1].length === 0) out.pop()
+    return out.join("
+")
+  }
+
+  function openArtEditor(key, value) {
+    designer.artKey = key
+    designer.artGrid = designer.artGridOf(value, 24, 10)
+    designer.artEditing = true
+  }
+
+  function artSet(r, c, value) {
+    if (r < 0 || c < 0 || r >= designer.artGrid.length || c >= designer.artGrid[0].length) return
+    if (designer.artGrid[r][c] === value) return
+    var grid = designer.artGrid.slice()
+    grid[r] = grid[r].slice()
+    grid[r][c] = value
+    designer.artGrid = grid
+  }
+
+  function artResize(dCols, dRows) {
+    var cols = Math.max(8, Math.min(96, designer.artCols + dCols))
+    var rows = Math.max(4, Math.min(48, designer.artRows + dRows))
+    var grid = []
+    for (var r = 0; r < rows; r++) {
+      var row = artRow(cols, false)
+      for (var c = 0; c < cols; c++)
+        if (r < designer.artGrid.length && c < designer.artGrid[r].length) row[c] = designer.artGrid[r][c]
+      grid.push(row)
+    }
+    designer.artGrid = grid
+  }
+
+  function artFill(value) {
+    var grid = []
+    for (var r = 0; r < designer.artRows; r++) grid.push(artRow(designer.artCols, value))
+    designer.artGrid = grid
+  }
+
+  function artInvert() {
+    var grid = []
+    for (var r = 0; r < designer.artGrid.length; r++) {
+      var row = designer.artGrid[r].slice()
+      for (var c = 0; c < row.length; c++) row[c] = !row[c]
+      grid.push(row)
+    }
+    designer.artGrid = grid
+  }
+
+  // The branding logo as a starting point: about.txt, the stock icon, or the
+  // copy in Ttfx.js, whichever OmarchyLogo found.
+  function artLoadLogo() {
+    designer.artGrid = designer.artGridOf(artLogo.text, 0, 0)
+  }
+
+  function artApply() {
+    if (designer.artKey.length > 0) designer.setProp(designer.artKey, designer.artTextOf(designer.artGrid))
+    designer.artEditing = false
+    designer.artKey = ""
+    designer.focusCanvas()
+  }
+
   // ------------------------------------------------------------ components
 
   function saveSelectionAsComponent(name) {
@@ -500,13 +633,13 @@ Item {
       rects.push(stage.rectOf(i))
     }
     if (nodes.length === 0) {
-      status = "Backgrounds cannot be saved as a component"
+      status = designer.tr("Backgrounds cannot be saved as a component")
       return
     }
     var comp = D.makeComponent(name, nodes, rects)
     service.saveComponent(D.componentSlug(name), JSON.stringify(comp))
     namingComponent = false
-    status = "Saved “" + comp.name + "” to your components"
+    status = designer.tr("Saved “%1” to your components").arg(comp.name)
   }
 
   function deleteComponent(slug) {
@@ -598,8 +731,8 @@ Item {
         font.weight: Font.DemiBold
       }
       Text {
-        text: designer.nodes.length + (designer.nodes.length === 1 ? " piece" : " pieces")
-          + (designer.dirty ? "  ·  unsaved" : "")
+        text: (designer.nodes.length === 1 ? designer.tr("1 piece") : designer.tr("%1 pieces").arg(designer.nodes.length))
+          + (designer.dirty ? "  ·  " + designer.tr("unsaved") : "")
         textFormat: Text.PlainText
         color: designer.dirty ? designer.accent : designer.muted
         font.family: designer.fontFamily
@@ -613,40 +746,40 @@ Item {
       spacing: Style.space(6)
 
       DesignerButton {
-        label: "Undo"
+        label: designer.tr("Undo")
         active: designer.undoStack.length > 0
         foreground: designer.foreground
         accent: designer.accent
         onClicked: designer.undo()
       }
       DesignerButton {
-        label: "Redo"
+        label: designer.tr("Redo")
         active: designer.redoStack.length > 0
         foreground: designer.foreground
         accent: designer.accent
         onClicked: designer.redo()
       }
       DesignerButton {
-        label: "Edit code"
+        label: designer.tr("Edit code")
         foreground: designer.foreground
         accent: designer.accent
         onClicked: designer.openCodeRequested(designer.path)
       }
       DesignerButton {
-        label: "Use this design"
+        label: designer.tr("Use this design")
         foreground: designer.foreground
         accent: designer.accent
         onClicked: designer.useRequested()
       }
       DesignerButton {
-        label: "Save  Ctrl+S"
+        label: designer.tr("Save  Ctrl+S")
         primary: designer.dirty
         foreground: designer.foreground
         accent: designer.accent
         onClicked: designer.save()
       }
       DesignerButton {
-        label: "Back  Esc"
+        label: designer.tr("Back  Esc")
         foreground: designer.foreground
         accent: designer.accent
         onClicked: designer.requestClose()
@@ -664,7 +797,7 @@ Item {
     verticalAlignment: Text.AlignVCenter
     text: designer.loadError
     textFormat: Text.PlainText
-    color: Color.lock.textError
+    color: Commons.Color.lock.textError
     font.family: designer.fontFamily
     font.pixelSize: Style.font.bodySmall
     wrapMode: Text.Wrap
@@ -700,7 +833,7 @@ Item {
         spacing: Style.space(6)
 
         Text {
-          text: "YOUR COMPONENTS"
+          text: designer.tr("YOUR COMPONENTS")
           color: designer.muted
           font.family: designer.fontFamily
           font.pixelSize: Style.font.caption
@@ -710,7 +843,7 @@ Item {
         Text {
           width: parent.width
           visible: designer.componentList.length === 0
-          text: "Select a piece (or several with Ctrl) and press “Save as component” to keep it here for every design."
+          text: designer.tr("Select a piece (or several with Ctrl) and press “Save as component” to keep it here for every design.")
           textFormat: Text.PlainText
           color: Qt.rgba(designer.foreground.r, designer.foreground.g, designer.foreground.b, 0.35)
           font.family: designer.fontFamily
@@ -764,7 +897,7 @@ Item {
               anchors.topMargin: Style.space(5)
               visible: componentArea.containsMouse || removeArea.containsMouse
               text: "✕"
-              color: removeArea.containsMouse ? Color.lock.textError : designer.muted
+              color: removeArea.containsMouse ? Commons.Color.lock.textError : designer.muted
               font.family: designer.fontFamily
               font.pixelSize: Style.font.caption
               MouseArea {
@@ -797,7 +930,7 @@ Item {
                   anchors.centerIn: parent
                   text: componentEntry.modelData.comp ? componentEntry.modelData.comp.name : ""
                   textFormat: Text.PlainText
-                  color: Color.background
+                  color: Commons.Color.background
                   font.family: designer.fontFamily
                   font.pixelSize: Style.font.caption
                   font.weight: Font.DemiBold
@@ -852,13 +985,16 @@ Item {
           Column {
             id: group
             required property string modelData
-            readonly property var entries: D.paletteFor(modelData)
+            // In the order of the names as they are shown.
+            readonly property var entries: D.paletteFor(modelData).sort(function(a, b) {
+              return designer.tr(a.kind.name).localeCompare(designer.tr(b.kind.name))
+            })
             width: paletteColumn.width
             spacing: Style.space(4)
             topPadding: Style.space(6)
 
             Text {
-              text: group.modelData.toUpperCase()
+              text: designer.tr(group.modelData).toUpperCase()
               color: designer.muted
               font.family: designer.fontFamily
               font.pixelSize: Style.font.caption
@@ -896,7 +1032,7 @@ Item {
                   anchors.right: parent.right
                   anchors.rightMargin: Style.space(6)
                   anchors.verticalCenter: parent.verticalCenter
-                  text: entry.modelData.kind.name
+                  text: designer.tr(entry.modelData.kind.name)
                   textFormat: Text.PlainText
                   color: designer.foreground
                   font.family: designer.fontFamily
@@ -923,9 +1059,9 @@ Item {
                     color: Qt.rgba(designer.accent.r, designer.accent.g, designer.accent.b, 0.85)
                     Text {
                       anchors.centerIn: parent
-                      text: entry.modelData.kind.name
+                      text: designer.tr(entry.modelData.kind.name)
                       textFormat: Text.PlainText
-                      color: Color.background
+                      color: Commons.Color.background
                       font.family: designer.fontFamily
                       font.pixelSize: Style.font.caption
                       font.weight: Font.DemiBold
@@ -1036,6 +1172,7 @@ Item {
         editing: true
         selection: designer.selection
         viewScale: designer.canvasScale
+        chromeRadius: designer.docCorners
         backgroundPath: designer.service ? designer.service.backgroundPath : ""
         backgroundVersion: designer.service ? designer.service.backgroundVersion : 0
         avatarPath: designer.service ? designer.service.avatarPath : ""
@@ -1043,6 +1180,10 @@ Item {
         videoPath: designer.service ? designer.service.videoPath : ""
         fingerprintConfigured: designer.service ? designer.service.fingerprintConfigured : false
         twelveHour: designer.service && designer.service.twelveHour !== undefined ? designer.service.twelveHour : false
+        wallpaperBlur: designer.service && designer.service.wallpaperBlurValue !== undefined ? designer.service.wallpaperBlurValue : -1
+        wallpaperDim: designer.service && designer.service.wallpaperDimShift !== undefined ? designer.service.wallpaperDimShift : 0
+        language: designer.service && designer.service.language !== undefined ? designer.service.language : "en"
+        fullName: designer.service && designer.service.accountName !== undefined ? designer.service.accountName : ""
         // Something in the box, so the input pieces are visible while arranging.
         passwordText: "omarchy"
         onNodePressed: function(id, additive) {
@@ -1114,8 +1255,10 @@ Item {
         spacing: Style.space(10)
 
         DesignerField {
+
+          language: designer.language
           width: parent.width
-          label: "DESIGN NAME"
+          label: designer.tr("DESIGN NAME")
           type: "text"
           value: designer.docName
           foreground: designer.foreground
@@ -1128,13 +1271,34 @@ Item {
           onEscaped: designer.focusCanvas()
         }
 
+        // The base's own chrome (media strip, owner message) follows the
+        // design: square for a sharp layout, a pill for a round one.
+        DesignerField {
+          language: designer.language
+          width: parent.width
+          label: designer.tr("CORNERS")
+          type: "number"
+          minimum: 0
+          maximum: 24
+          step: 1
+          value: designer.docCorners
+          foreground: designer.foreground
+          accent: designer.accent
+          onEdited: function(next) {
+            designer.pushUndo("corners")
+            designer.docCorners = D.clampCorners(next)
+            designer.touch()
+          }
+          onEscaped: designer.focusCanvas()
+        }
+
         Rectangle { width: parent.width; height: 1; color: designer.line }
 
         Text {
           width: parent.width
-          text: designer.selection.length === 0 ? "NOTHING SELECTED"
-            : (designer.selection.length > 1 ? designer.selection.length + " PIECES SELECTED"
-               : (designer.primaryKind ? designer.primaryKind.name.toUpperCase() : ""))
+          text: designer.selection.length === 0 ? designer.tr("NOTHING SELECTED")
+            : (designer.selection.length > 1 ? designer.tr("%1 PIECES SELECTED").arg(designer.selection.length)
+               : (designer.primaryKind ? designer.tr(designer.primaryKind.name).toUpperCase() : ""))
           textFormat: Text.PlainText
           color: designer.selection.length === 0 ? designer.muted : designer.accent
           font.family: designer.fontFamily
@@ -1146,7 +1310,7 @@ Item {
         Text {
           width: parent.width
           visible: designer.selection.length === 0
-          text: "Drag a piece onto the screen, or click one there to change it."
+          text: designer.tr("Drag a piece onto the screen, or click one there to change it.")
           textFormat: Text.PlainText
           color: Qt.rgba(designer.foreground.r, designer.foreground.g, designer.foreground.b, 0.35)
           font.family: designer.fontFamily
@@ -1162,7 +1326,7 @@ Item {
           visible: designer.primary !== null && !D.isFill(designer.primary)
 
           Text {
-            text: "STICKS TO"
+            text: designer.tr("STICKS TO")
             color: designer.muted
             font.family: designer.fontFamily
             font.pixelSize: Style.font.caption
@@ -1196,7 +1360,7 @@ Item {
                     width: Style.space(5)
                     height: width
                     radius: 1
-                    color: parent.current ? Color.background : designer.muted
+                    color: parent.current ? Commons.Color.background : designer.muted
                   }
                   MouseArea {
                     id: anchorArea
@@ -1212,8 +1376,9 @@ Item {
               spacing: Style.space(4)
               width: inspectorColumn.width - Style.space(84)
               DesignerField {
+                language: designer.language
                 width: parent.width
-                label: "OFFSET X"
+                label: designer.tr("OFFSET X")
                 type: "number"
                 minimum: -10000
                 maximum: 10000
@@ -1225,8 +1390,9 @@ Item {
                 onEscaped: designer.focusCanvas()
               }
               DesignerField {
+                language: designer.language
                 width: parent.width
-                label: "OFFSET Y"
+                label: designer.tr("OFFSET Y")
                 type: "number"
                 minimum: -10000
                 maximum: 10000
@@ -1244,8 +1410,9 @@ Item {
             spacing: Style.space(8)
             visible: designer.primary !== null && D.isSized(designer.primary)
             DesignerField {
+              language: designer.language
               width: (inspectorColumn.width - Style.space(8)) / 2
-              label: "WIDTH"
+              label: designer.tr("WIDTH")
               type: "number"
               minimum: 0
               maximum: 10000
@@ -1257,8 +1424,9 @@ Item {
               onEscaped: designer.focusCanvas()
             }
             DesignerField {
+              language: designer.language
               width: (inspectorColumn.width - Style.space(8)) / 2
-              label: "HEIGHT"
+              label: designer.tr("HEIGHT")
               type: "number"
               minimum: 0
               maximum: 10000
@@ -1275,7 +1443,7 @@ Item {
           Text {
             width: parent.width
             visible: designer.primary !== null && !D.isSized(designer.primary)
-            text: "Set a width to make it wrap; leave it at 0 and it hugs its text."
+            text: designer.tr("Set a width to make it wrap; leave it at 0 and it hugs its text.")
             textFormat: Text.PlainText
             color: Qt.rgba(designer.foreground.r, designer.foreground.g, designer.foreground.b, 0.35)
             font.family: designer.fontFamily
@@ -1284,9 +1452,11 @@ Item {
           }
 
           DesignerField {
+
+            language: designer.language
             width: parent.width
             visible: designer.primary !== null && !D.isSized(designer.primary)
-            label: "WIDTH (0 = FIT TEXT)"
+            label: designer.tr("WIDTH (0 = FIT TEXT)")
             type: "number"
             minimum: 0
             maximum: 10000
@@ -1312,11 +1482,13 @@ Item {
           model: designer.primaryKind ? designer.primaryKind.fields : []
 
           DesignerField {
+
+            language: designer.language
             required property var modelData
             width: inspectorColumn.width
-            label: modelData.label.toUpperCase()
+            label: designer.tr(modelData.label).toUpperCase()
             type: modelData.type
-            options: modelData.options ? modelData.options : []
+            options: (modelData.options ? modelData.options : []).map(function(o) { return { id: o.id, name: designer.tr(o.name) } })
             minimum: modelData.min !== undefined ? modelData.min : 0
             maximum: modelData.max !== undefined ? modelData.max : 1
             step: modelData.step !== undefined ? modelData.step : 0.05
@@ -1333,6 +1505,7 @@ Item {
               designer.pendingFileKey = modelData.key
               designer.pickFileRequested()
             }
+            onDrawArtRequested: designer.openArtEditor(modelData.key, designer.primary ? designer.primary.spec[modelData.key] : "")
           }
         }
 
@@ -1351,37 +1524,37 @@ Item {
           visible: designer.selection.length > 0
 
           DesignerButton {
-            label: "Duplicate"
+            label: designer.tr("Duplicate")
             foreground: designer.foreground
             accent: designer.accent
             onClicked: designer.duplicateSelected()
           }
           DesignerButton {
-            label: "Delete"
+            label: designer.tr("Delete")
             foreground: designer.foreground
             accent: designer.accent
             onClicked: designer.removeSelected()
           }
           DesignerButton {
-            label: "Front"
+            label: designer.tr("Front")
             foreground: designer.foreground
             accent: designer.accent
             onClicked: designer.restack(2)
           }
           DesignerButton {
-            label: "Forward"
+            label: designer.tr("Forward")
             foreground: designer.foreground
             accent: designer.accent
             onClicked: designer.restack(1)
           }
           DesignerButton {
-            label: "Back"
+            label: designer.tr("Back")
             foreground: designer.foreground
             accent: designer.accent
             onClicked: designer.restack(-1)
           }
           DesignerButton {
-            label: "Bottom"
+            label: designer.tr("Bottom")
             foreground: designer.foreground
             accent: designer.accent
             onClicked: designer.restack(-2)
@@ -1391,7 +1564,7 @@ Item {
         DesignerButton {
           width: parent.width
           visible: designer.selection.length > 0 && !designer.namingComponent
-          label: "Save as component"
+          label: designer.tr("Save as component")
           foreground: designer.foreground
           accent: designer.accent
           onClicked: {
@@ -1409,7 +1582,7 @@ Item {
           function forceFieldFocus() { nameEntry.forceActiveFocus() }
 
           Text {
-            text: "NAME IT"
+            text: designer.tr("NAME IT")
             color: designer.muted
             font.family: designer.fontFamily
             font.pixelSize: Style.font.caption
@@ -1423,7 +1596,7 @@ Item {
             color: Qt.rgba(designer.foreground.r, designer.foreground.g, designer.foreground.b, 0.07)
             border.width: 1
             border.color: nameEntry.activeFocus ? designer.accent : designer.line
-            TextInput {
+            TypedInput {
               id: nameEntry
               anchors.fill: parent
               anchors.leftMargin: Style.space(8)
@@ -1448,14 +1621,14 @@ Item {
           Row {
             spacing: Style.space(5)
             DesignerButton {
-              label: "Save"
+              label: designer.tr("Save")
               primary: true
               foreground: designer.foreground
               accent: designer.accent
               onClicked: if (nameEntry.text.trim().length > 0) designer.saveSelectionAsComponent(nameEntry.text.trim())
             }
             DesignerButton {
-              label: "Cancel"
+              label: designer.tr("Cancel")
               foreground: designer.foreground
               accent: designer.accent
               onClicked: { designer.namingComponent = false; designer.focusCanvas() }
@@ -1468,7 +1641,7 @@ Item {
         Rectangle { width: parent.width; height: 1; color: designer.line }
 
         Text {
-          text: "LAYERS  ·  TOP FIRST"
+          text: designer.tr("LAYERS  ·  TOP FIRST")
           color: designer.muted
           font.family: designer.fontFamily
           font.pixelSize: Style.font.caption
@@ -1511,7 +1684,7 @@ Item {
                 anchors.rightMargin: Style.space(6)
                 anchors.verticalCenter: parent.verticalCenter
                 text: {
-                  var name = D.kindName(layerRow.modelData.kind)
+                  var name = designer.tr(D.kindName(layerRow.modelData.kind))
                   var body = String(layerRow.modelData.spec.text || "")
                   return body.length > 0 ? name + " · " + body : name
                 }
@@ -1553,15 +1726,199 @@ Item {
       anchors.verticalCenter: parent.verticalCenter
       width: parent.width - Style.space(20)
       text: {
-        if (designer.hoverHint.length > 0) return designer.hoverHint
+        if (designer.hoverHint.length > 0) return designer.tr(designer.hoverHint)
         if (designer.status.length > 0) return designer.status
-        return "Drag pieces in   ·   arrows nudge (Shift: 10px)   ·   Ctrl+click multi-select   ·   Ctrl+D duplicate   ·   Del remove   ·   [ ] restack   ·   Ctrl+Z undo   ·   Ctrl+S save"
+        return designer.tr("Drag pieces in   ·   arrows nudge (Shift: 10px)   ·   Ctrl+click multi-select   ·   Ctrl+D duplicate   ·   Del remove   ·   [ ] restack   ·   Ctrl+Z undo   ·   Ctrl+S save")
       }
       textFormat: Text.PlainText
       color: designer.status.length > 0 && designer.hoverHint.length === 0 ? designer.foreground : designer.muted
       font.family: designer.fontFamily
       font.pixelSize: Style.font.caption
       elide: Text.ElideRight
+    }
+  }
+
+  // ------------------------------------------------------------ art editor
+
+  // Draw the shape ttfx animates: click or drag to fill cells, and the
+  // drawing goes back into the piece as block characters.
+  Rectangle {
+    id: artEditor
+    anchors.fill: parent
+    visible: designer.artEditing
+    color: Qt.rgba(designer.background.r, designer.background.g, designer.background.b, 0.97)
+    z: 90
+
+    // Nothing behind this reacts while it is up.
+    MouseArea { anchors.fill: parent; hoverEnabled: true; acceptedButtons: Qt.AllButtons }
+
+    Keys.onEscapePressed: { designer.artEditing = false; designer.artKey = ""; designer.focusCanvas() }
+    Keys.onReturnPressed: designer.artApply()
+    focus: designer.artEditing
+    onVisibleChanged: if (visible) forceActiveFocus()
+
+    Column {
+      anchors.centerIn: parent
+      spacing: Style.space(12)
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: designer.tr("DRAW THE SHAPE")
+        color: designer.muted
+        font.family: designer.fontFamily
+        font.pixelSize: Style.font.caption
+        font.letterSpacing: 2
+      }
+
+      // The grid, sized to fit whatever is left of the screen.
+      Rectangle {
+        id: gridBox
+        anchors.horizontalCenter: parent.horizontalCenter
+        // ttfx draws every cell as a character of the theme's monospace font,
+        // about twice as tall as it is wide. Square cells showed the shape at
+        // double its width, so the cells take the font's own proportions,
+        // measured the way TtfxText measures them.
+        readonly property real aspect: cellProbe.contentWidth > 0
+          ? Math.max(1, Math.ceil(cellProbe.contentHeight) / (cellProbe.contentWidth / 10)) : 2
+        readonly property real cell: Math.max(3, Math.floor(Math.min(
+          (designer.width * 0.8) / Math.max(1, designer.artCols),
+          (designer.height * 0.6) / Math.max(1, designer.artRows * aspect))))
+        readonly property real cellH: Math.round(cell * aspect)
+        width: designer.artCols * cell + 2
+        height: designer.artRows * cellH + 2
+
+        Text {
+          id: cellProbe
+          visible: false
+          text: "MMMMMMMMMM"
+          font.family: Style.font.family
+          font.pixelSize: 100
+        }
+        color: designer.well
+        border.width: 1
+        border.color: designer.line
+
+        Item {
+          id: cells
+          x: 1
+          y: 1
+          width: designer.artCols * gridBox.cell
+          height: designer.artRows * gridBox.cellH
+
+          Repeater {
+            model: designer.artRows * designer.artCols
+
+            Rectangle {
+              required property int index
+              readonly property int row: Math.floor(index / Math.max(1, designer.artCols))
+              readonly property int col: index % Math.max(1, designer.artCols)
+              x: col * gridBox.cell
+              y: row * gridBox.cellH
+              width: gridBox.cell
+              height: gridBox.cellH
+              color: designer.artGrid[row] && designer.artGrid[row][col] ? designer.accent : "transparent"
+              border.width: gridBox.cell >= 8 ? 1 : 0
+              border.color: Qt.rgba(designer.foreground.r, designer.foreground.g, designer.foreground.b, 0.08)
+            }
+          }
+
+          // One area for the whole grid: a press decides whether this stroke
+          // fills or clears, and the drag paints every cell it crosses.
+          MouseArea {
+            anchors.fill: parent
+            hoverEnabled: false
+            function cellAt(mx, my) {
+              return { r: Math.floor(my / gridBox.cellH), c: Math.floor(mx / gridBox.cell) }
+            }
+            onPressed: function(mouse) {
+              var at = cellAt(mouse.x, mouse.y)
+              if (at.r < 0 || at.r >= designer.artRows || at.c < 0 || at.c >= designer.artCols) return
+              designer.artPaint = !designer.artGrid[at.r][at.c]
+              designer.artSet(at.r, at.c, designer.artPaint)
+            }
+            onPositionChanged: function(mouse) {
+              if (!pressed) return
+              var at = cellAt(mouse.x, mouse.y)
+              designer.artSet(at.r, at.c, designer.artPaint)
+            }
+          }
+        }
+      }
+
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(6)
+
+        DesignerButton {
+          label: designer.tr("Omarchy logo")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artLoadLogo()
+        }
+        DesignerButton {
+          label: designer.tr("Clear")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artFill(false)
+        }
+        DesignerButton {
+          label: designer.tr("Invert")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artInvert()
+        }
+        DesignerButton {
+          label: designer.tr("Wider")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artResize(4, 0)
+        }
+        DesignerButton {
+          label: designer.tr("Narrower")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artResize(-4, 0)
+        }
+        DesignerButton {
+          label: designer.tr("Taller")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artResize(0, 2)
+        }
+        DesignerButton {
+          label: designer.tr("Shorter")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artResize(0, -2)
+        }
+      }
+
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(8)
+
+        Text {
+          anchors.verticalCenter: parent.verticalCenter
+          text: designer.tr("%1 x %2 cells").arg(designer.artCols).arg(designer.artRows) + "   ·   " + designer.tr("Esc cancels, Enter keeps it")
+          color: designer.muted
+          font.family: designer.fontFamily
+          font.pixelSize: Style.font.caption
+        }
+
+        DesignerButton {
+          label: designer.tr("Cancel")
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: { designer.artEditing = false; designer.artKey = ""; designer.focusCanvas() }
+        }
+        DesignerButton {
+          label: designer.tr("Done")
+          primary: true
+          foreground: designer.foreground
+          accent: designer.accent
+          onClicked: designer.artApply()
+        }
+      }
     }
   }
 

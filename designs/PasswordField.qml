@@ -1,9 +1,11 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 BorderSurface {
   id: field
+  function tr(text) { return lock && typeof lock.tr === "function" ? lock.tr(text) : text }
 
   property var lock: null
   // In boot-screen snapshots the box itself stays -- the boot theme puts its
@@ -24,29 +26,61 @@ BorderSurface {
   readonly property alias input: input
   readonly property bool errorState: lock ? lock.errorState : false
   readonly property bool authenticating: lock ? lock.authenticatingPassword : false
-  readonly property bool fingerprint: lock ? lock.fingerprintConfigured : false
-  readonly property bool face: lock ? lock.faceConfigured : false
-  readonly property bool fido2: lock ? lock.fido2Configured : false
+  // The sign-in icons, unless hidden in Settings (DesignBase.showAuthIcons).
+  readonly property bool authIcons: lock ? lock.showAuthIcons !== false : true
+  readonly property bool fingerprint: lock ? lock.fingerprintConfigured && authIcons : false
+  readonly property bool face: lock ? lock.faceConfigured && authIcons : false
+  readonly property bool fido2: lock ? lock.fido2Configured && authIcons : false
   readonly property bool fido2Active: lock ? lock.fido2Active : false
   readonly property bool revealed: lock ? lock.passwordVisible : false
-  readonly property bool showToggle: lock ? (lock.showPasswordToggle && !lock.fido2Active) : true
+  readonly property bool showToggle: lock ? (lock.showPasswordToggle && lock.allowPasswordToggle !== false && !lock.fido2Active) : true
   readonly property int fieldFontSize: Math.round(Style.font.heading * fontScale)
   readonly property int dotFontSize: Math.round(Style.font.heading * 1.25 * fontScale)
   readonly property int dotLetterSpacing: Math.round(Style.font.heading * 0.19 * fontScale)
   readonly property real fingerprintReserve: (fingerprint ? Math.round(fingerprintIcon.implicitWidth + 12) : 0) + (face ? Math.round(faceIcon.implicitWidth + 12) : 0) + (fido2 ? Math.round(fido2Icon.implicitWidth + 12) : 0) + (showToggle ? Math.round(eyeButton.width + 8) : 0)
-  readonly property real glyphReserve: showLockGlyph ? Math.round(lockGlyph.implicitWidth + 12) : 0
+  // A password is typed blind, so a layout that is not a plain US keyboard is
+  // said in the box. It goes with the lock glyph on the left, and is left out
+  // of boot snapshots like the rest of the chrome.
+  readonly property bool showLayout: lock ? ((lock.foreignLayout === true || lock.layoutSwitchable === true) && lock.showLayoutBadge !== false && !snapshotBox && layoutFits) : false
+  readonly property bool showCaps: lock ? (lock.capsLock === true && lock.showCapsBadge !== false && !snapshotBox) : false
+  // The badge is sized from the code and comes out of the text area, and a
+  // layout is not always a two-letter country code: a custom XKB layout is a
+  // free-form name, and Hyprland reports it verbatim. Unbounded, one of those
+  // pushes the placeholder out of the field.
+  //
+  // Not truncated either. Cutting `USMACFR-XPS` down to `USMA…` leaves a badge
+  // opening with US, which reads as the plain-US case this is here to warn
+  // about -- worse than saying nothing. A code that cannot fit is not a
+  // country code, so the badge stands down and leaves the field to the text.
+  readonly property real layoutBadgeMax: Math.round(fieldFontSize * 2.2)
+  readonly property bool layoutFits: layoutCode.implicitWidth <= layoutBadgeMax
+  readonly property real glyphReserve: (showLockGlyph ? Math.round(lockGlyph.implicitWidth + 12) : 0)
+    + (showLayout ? Math.round(layoutBadge.width + 8) : 0)
+    + (showCaps ? Math.round(capsBadge.width + 8) : 0)
   readonly property real dotScale: dotMetrics.advanceWidth > 0
     ? Math.min(1, (input.width - 4) / dotMetrics.advanceWidth)
     : 1
 
   width: 400
   height: 60
-  color: Color.lock.background
+  color: Commons.Color.lock.background
   radius: Math.max(Style.cornerRadius, 12)
   clip: true
-  borderSpec: errorState
-    ? Border.surfaceSpec("lock", "border-error", Color.lock.borderError, field.outlineThickness, "border-alpha")
-    : Border.surfaceSpec("lock", "border-active", Color.lock.borderActive, field.outlineThickness, "border-alpha")
+  // The field's colors, the lock theme's unless a design brings its own
+  // palette (the seasonal ones do). The outline follows the theme's border
+  // token -- width, alpha, gradient -- until a design sets `outlineColor`.
+  property color textColor: Commons.Color.lock.text
+  property color mutedColor: Commons.Color.lock.placeholder
+  property color accentColor: Commons.Color.lock.borderActive
+  property color errorColor: Commons.Color.lock.textError
+  property color outlineColor: "transparent"
+  property color outlineErrorColor: errorColor
+  readonly property var themedBorder: errorState
+    ? Border.surfaceSpec("lock", "border-error", Commons.Color.lock.borderError, field.outlineThickness, "border-alpha")
+    : Border.surfaceSpec("lock", "border-active", Commons.Color.lock.borderActive, field.outlineThickness, "border-alpha")
+  borderSpec: outlineColor.a > 0
+    ? ({ color: errorState ? outlineErrorColor : outlineColor, widths: themedBorder.widths, gradient: { colors: [], angle: 0, enabled: false } })
+    : themedBorder
 
   function focusInput() { input.forceActiveFocus() }
 
@@ -82,9 +116,73 @@ BorderSurface {
     anchors.verticalCenter: parent.verticalCenter
     visible: field.showLockGlyph
     text: field.authenticating ? "󰔟" : (field.errorState ? "󰍁" : "󰌾")
-    color: field.errorState ? Color.lock.textError : Color.lock.placeholder
+    color: field.errorState ? field.errorColor : field.mutedColor
     font.family: Style.font.family
     font.pixelSize: Math.round(field.fieldFontSize * 1.1)
+  }
+
+  Rectangle {
+    id: layoutBadge
+    // Above the input, so a click on it reaches the layout switch.
+    z: 2
+    visible: field.showLayout
+    anchors.left: field.showLockGlyph ? lockGlyph.right : parent.left
+    anchors.leftMargin: field.showLockGlyph ? 8 : field.borderLeft + field.sidePadding
+    anchors.verticalCenter: parent.verticalCenter
+    width: layoutCode.implicitWidth + 10
+    height: Math.round(field.fieldFontSize * 1.15)
+    radius: 3
+    color: "transparent"
+    border.width: 1
+    border.color: field.mutedColor
+
+    Text {
+      id: layoutCode
+      anchors.centerIn: parent
+      text: field.lock ? field.lock.keyboardLayout : ""
+      textFormat: Text.PlainText
+      color: field.mutedColor
+      font.family: Style.font.family
+      font.pixelSize: Math.round(field.fieldFontSize * 0.62)
+      font.letterSpacing: 1
+    }
+
+    // The next layout, when there is one to go to. The field keeps focus.
+    MouseArea {
+      anchors.fill: parent
+      anchors.margins: -4
+      enabled: field.lock ? field.lock.layoutSwitchable === true : false
+      cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+      onClicked: field.lock.layoutSwitchRequested()
+    }
+  }
+
+  // Caps lock earns the accent: it is the one that turns every character
+  // wrong, and the reader is about to type a password they cannot see.
+  Rectangle {
+    id: capsBadge
+    visible: field.showCaps
+    anchors.left: field.showLayout ? layoutBadge.right
+      : (field.showLockGlyph ? lockGlyph.right : parent.left)
+    anchors.leftMargin: field.showLayout || field.showLockGlyph ? 8 : field.borderLeft + field.sidePadding
+    anchors.verticalCenter: parent.verticalCenter
+    width: capsLabel.implicitWidth + 10
+    height: Math.round(field.fieldFontSize * 1.15)
+    radius: 3
+    color: "transparent"
+    border.width: 1
+    border.color: field.accentColor
+
+    Text {
+      id: capsLabel
+      anchors.centerIn: parent
+      text: "CAPS"
+      textFormat: Text.PlainText
+      color: field.accentColor
+      font.family: Style.font.family
+      font.pixelSize: Math.round(field.fieldFontSize * 0.62)
+      font.letterSpacing: 1
+    }
   }
 
   LockInput {
@@ -93,8 +191,17 @@ BorderSurface {
     anchors.fill: parent
     anchors.topMargin: field.borderTop
     anchors.bottomMargin: field.borderBottom
-    anchors.leftMargin: field.borderLeft + field.sidePadding + Math.max(field.fingerprintReserve, field.glyphReserve)
-    anchors.rightMargin: field.borderRight + field.sidePadding + Math.max(field.fingerprintReserve, field.glyphReserve)
+    // Mirrored only when the text is centred, which is what the mirroring is
+    // for: keeping it centred between the chrome on either side. A design that
+    // aligns left or right has no such need, and mirroring there opens a gap
+    // the width of the opposite side's icons before the first character.
+    // Each side still reserves its own chrome, so text never runs under it.
+    anchors.leftMargin: field.borderLeft + field.sidePadding
+      + (field.textAlignment === TextInput.AlignHCenter
+        ? Math.max(field.fingerprintReserve, field.glyphReserve) : field.glyphReserve)
+    anchors.rightMargin: field.borderRight + field.sidePadding
+      + (field.textAlignment === TextInput.AlignHCenter
+        ? Math.max(field.fingerprintReserve, field.glyphReserve) : field.fingerprintReserve)
     verticalAlignment: TextInput.AlignVCenter
     horizontalAlignment: field.textAlignment
     font.pixelSize: text.length > 0 && !field.revealed ? Math.max(1, Math.floor(field.dotFontSize * field.dotScale)) : field.fieldFontSize
@@ -102,19 +209,19 @@ BorderSurface {
     cursorVisible: activeFocus && text.length > 0 && !field.authenticating && !field.errorState
     cursorDelegate: Rectangle {
       width: 2
-      color: Color.lock.text
+      color: field.textColor
       visible: input.cursorVisible
     }
   }
 
   Text {
     anchors.fill: input
-    text: field.authenticating ? "Checking…"
+    text: field.authenticating ? tr("Checking…")
       : (field.errorState ? field.lock.failureMessage
-      : (field.fido2Active ? (field.lock.fido2Status.length > 0 ? field.lock.fido2Status : "Waiting for your key…") : field.placeholder))
+      : (field.fido2Active ? (field.lock.fido2Status.length > 0 ? field.lock.fido2Status : tr("Waiting for your key…")) : tr(field.placeholder)))
     textFormat: Text.PlainText
     visible: input.text.length === 0 && !field.snapshotBox
-    color: field.authenticating ? Color.lock.text : (field.errorState ? Color.lock.textError : Color.lock.placeholder)
+    color: field.authenticating ? field.textColor : (field.errorState ? field.errorColor : field.mutedColor)
     font.family: Style.font.family
     font.pixelSize: field.fieldFontSize
     font.italic: !field.authenticating && field.errorState
@@ -136,7 +243,7 @@ BorderSurface {
     Text {
       anchors.centerIn: parent
       text: field.revealed ? "󰈉" : "󰈈"
-      color: field.revealed ? Color.lock.borderActive : Color.lock.placeholder
+      color: field.revealed ? field.accentColor : field.mutedColor
       font.family: Style.font.family
       font.pixelSize: Math.round(field.fieldFontSize * 1.1)
     }
@@ -153,12 +260,16 @@ BorderSurface {
 
   Text {
     id: fingerprintIcon
-    anchors.right: faceIcon.left
-    anchors.rightMargin: -9
+    // Beside the face icon when there is one; otherwise in the slot the face
+    // icon would take. Anchoring to an invisible face icon left it on top of
+    // the eye button whenever a reader was enrolled without face unlock.
+    anchors.right: field.face ? faceIcon.left : parent.right
+    anchors.rightMargin: field.face ? -9 : field.borderRight + field.sidePadding
+      + (field.fido2 ? Math.round(fido2Icon.implicitWidth + 8) : 0)
     anchors.verticalCenter: parent.verticalCenter
     visible: field.fingerprint
     text: "󰈷"
-    color: Color.lock.placeholder
+    color: field.mutedColor
     font.family: Style.font.family
     font.pixelSize: Math.round(field.fieldFontSize * 1.1)
   }
@@ -171,7 +282,7 @@ BorderSurface {
     anchors.verticalCenter: parent.verticalCenter
     visible: field.face
     text: "󰱻"
-    color: Color.lock.placeholder
+    color: field.mutedColor
     font.family: Style.font.family
     font.pixelSize: Math.round(field.fieldFontSize * 1.1)
   }
@@ -185,7 +296,7 @@ BorderSurface {
     anchors.verticalCenter: parent.verticalCenter
     visible: field.fido2
     text: ""
-    color: field.fido2Active ? Color.lock.text : Color.lock.placeholder
+    color: field.fido2Active ? field.textColor : field.mutedColor
     font.family: Style.font.family
     font.pixelSize: Math.round(field.fieldFontSize * 1.1)
     MouseArea {

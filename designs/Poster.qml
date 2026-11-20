@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 
 DesignBase {
   id: lock
@@ -31,7 +32,7 @@ DesignBase {
       Text {
         anchors.right: parent.right
         text: lock.clock("HH")
-        color: Color.lock.text
+        color: Commons.Color.lock.text
         font.family: Style.font.family
         font.pixelSize: lock.bigSize
         font.weight: Font.Black
@@ -42,7 +43,7 @@ DesignBase {
       Text {
         anchors.right: parent.right
         text: lock.clock("mm")
-        color: Color.lock.borderActive
+        color: Commons.Color.lock.borderActive
         font.family: Style.font.family
         font.pixelSize: lock.bigSize
         font.weight: Font.Black
@@ -56,7 +57,7 @@ DesignBase {
       anchors.right: parent.right
       visible: lock.meridiem.length > 0
       text: lock.meridiem
-      color: Color.lock.borderActive
+      color: Commons.Color.lock.borderActive
       font.family: Style.font.family
       font.pixelSize: Style.font.heading
       font.letterSpacing: 6
@@ -64,16 +65,16 @@ DesignBase {
     Item { width: 1; height: Math.round(lock.bigSize * 0.12) }
     Text {
       anchors.right: parent.right
-      text: Qt.formatDate(lock.now, "dddd").toUpperCase()
-      color: Color.lock.text
+      text: lock.date("dddd").toUpperCase()
+      color: Commons.Color.lock.text
       font.family: Style.font.family
       font.pixelSize: Style.font.heading
       font.letterSpacing: 6
     }
     Text {
       anchors.right: parent.right
-      text: Qt.formatDate(lock.now, "d MMMM yyyy").toUpperCase()
-      color: lock.withAlpha(Color.lock.text, 0.7)
+      text: lock.date("d MMMM yyyy").toUpperCase()
+      color: lock.withAlpha(Commons.Color.lock.text, 0.7)
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       font.letterSpacing: 4
@@ -98,16 +99,17 @@ DesignBase {
       Column {
         anchors.verticalCenter: parent.verticalCenter
         Text {
-          text: lock.userName
-          color: Color.lock.text
+          text: lock.displayName
+          textFormat: Text.PlainText
+          color: Commons.Color.lock.text
           font.family: Style.font.family
           font.pixelSize: Style.font.title
           font.weight: Font.DemiBold
         }
         Text {
-          text: lock.errorState ? lock.failureMessage : (lock.authenticatingPassword ? "Checking…" : lock.hostName)
+          text: lock.errorState ? lock.failureMessage : (lock.authenticatingPassword ? lock.tr("Checking…") : lock.hostName)
           textFormat: Text.PlainText
-          color: lock.errorState ? Color.lock.textError : lock.withAlpha(Color.lock.text, 0.6)
+          color: lock.errorState ? Commons.Color.lock.textError : lock.withAlpha(Commons.Color.lock.text, 0.6)
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -120,8 +122,8 @@ DesignBase {
       width: 360
       height: 52
       textAlignment: TextInput.AlignLeft
-      placeholder: "Password"
-      color: lock.withAlpha(Color.lock.background, 0.7)
+      placeholder: lock.tr("Password")
+      color: lock.withAlpha(Commons.Color.lock.background, 0.7)
     }
   }
 }

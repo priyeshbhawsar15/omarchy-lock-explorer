@@ -12,6 +12,7 @@ var CATEGORIES = [
   { id: "fun", name: "Fun" },
   { id: "motion", name: "Motion" },
   { id: "reactive", name: "Reactive" },
+  { id: "seasonal", name: "Seasonal" },
   { id: "custom", name: "Custom" }
 ]
 
@@ -44,35 +45,73 @@ var DESIGNS = [
   { id: "pond", file: "Pond.qml", name: "Pond", description: "Keystrokes ripple across the screen", tags: ["reactive", "clock"], anim: true },
   { id: "constellation", file: "Constellation.qml", name: "Constellation", description: "Your typing draws a constellation", tags: ["reactive", "dark"], anim: true },
   { id: "sparks", file: "Sparks.qml", name: "Sparks", description: "The field throws embers as you type", tags: ["reactive", "fun"], anim: true },
+  { id: "cipher", file: "Cipher.qml", name: "Cipher", description: "A block clock that decrypts itself, drawn by ttfx", tags: ["dark", "clock", "fun"], anim: true },
+  { id: "screensaver", file: "Screensaver.qml", name: "Screensaver", description: "Your Omarchy logo through ttfx effects, like the screensaver", tags: ["dark", "fun"], anim: true },
+  { id: "ember", file: "Ember.qml", name: "Ember", description: "The clock burns into place, drawn by ttfx", tags: ["dark", "clock"], anim: true },
+  { id: "synthwave", file: "Synthwave.qml", name: "Synthwave", description: "A grid draws across the screen and dissolves into the clock", tags: ["dark", "fun"], anim: true },
+  { id: "etch", file: "Etch.qml", name: "Etch", description: "A laser etches the greeting and time", tags: ["type", "fun"], anim: true },
+  { id: "bounce", file: "Bounce.qml", name: "Bounce", description: "The clock rains down as bouncing balls", tags: ["fun", "clock"], anim: true },
+  { id: "digital", file: "Digital.qml", name: "Digital", description: "Code rain that settles into the clock", tags: ["dark", "fun"], anim: true },
+  { id: "spotlight", file: "Spotlight.qml", name: "Spotlight", description: "Spotlights search a dark stage and light up the time", tags: ["dark", "clock"], anim: true },
+  { id: "fireworks", file: "Fireworks.qml", name: "Fireworks", description: "Fireworks burst and fall into the clock", tags: ["fun", "clock"], anim: true },
+  { id: "vhs", file: "Vhs.qml", name: "VHS", description: "A paused tape with a clock that tracks badly", tags: ["fun", "type"], anim: true },
+  { id: "horizon", file: "Horizon.qml", name: "Event Horizon", description: "The clock falls into a black hole and bursts back out", tags: ["dark", "fun"], anim: true },
+  { id: "orbit", file: "Orbit.qml", name: "Orbit", description: "Launchers circle the screen and fire the clock in", tags: ["fun", "clock"], anim: true },
+  { id: "binary", file: "Binary.qml", name: "Binary", description: "Streams of binary settle into the Omarchy logo", tags: ["dark", "fun"], anim: true },
+  { id: "tracking", file: "Tracking.qml", name: "Tracking", description: "The Omarchy logo on a worn tape", tags: ["fun"], anim: true },
+  { id: "login", file: "Login.qml", name: "Login", description: "The Omarchy logo next to a terminal prompt", tags: ["dark", "type"], anim: true },
+  { id: "keycode", file: "Keycode.qml", name: "Keycode", description: "The Omarchy logo over a row of password cells", tags: ["dark", "minimal"], anim: true },
+  { id: "statusline", file: "Statusline.qml", name: "Statusline", description: "An editor status bar with :unlock", tags: ["dark", "fun"], anim: true },
+  { id: "forge", file: "Forge.qml", name: "Forge", description: "The Omarchy logo burns into place", tags: ["dark", "fun"], anim: true },
+  { id: "mainframe", file: "Mainframe.qml", name: "Mainframe", description: "The Omarchy logo decrypts itself", tags: ["dark", "minimal"], anim: true },
+  { id: "beacon", file: "Beacon.qml", name: "Beacon", description: "Beams light the Omarchy logo, then it pulses", tags: ["dark", "fun"], anim: true },
+  { id: "supernova", file: "Supernova.qml", name: "Supernova", description: "The Omarchy logo bursts out of a black hole", tags: ["dark", "fun"], anim: true },
+  { id: "core", file: "Core.qml", name: "Core", description: "Type into the middle of the Omarchy logo", tags: ["dark", "minimal"], anim: true },
+  { id: "panel", file: "Panel.qml", name: "Panel", description: "The Omarchy logo cut out of an accent panel", tags: ["cards", "type"], anim: true },
   // clip: the design's video is held on its first frame while locked and plays
   // through as the unlock, see UnlockClip.qml. One clip per design.
   { id: "storm", file: "Storm.qml", name: "Storm", clip: true, description: "Calm ridge, the lightning is your unlock", tags: ["motion", "dark"], boot: true, bootKind: "clip", clipFile: "omarchy-storm.mp4", credit: "@yamzeight", anim: true },
   { id: "eyes", file: "Eyes.qml", name: "Eyes", clip: true, description: "The eyes open up when you get in", tags: ["motion", "dark"], boot: true, bootKind: "clip", clipFile: "omarchy-eye.mp4", credit: "@yamzeight", anim: true },
-  { id: "river", file: "River.qml", name: "River", clip: true, description: "A painting that comes alive on unlock", tags: ["motion"], boot: true, bootKind: "clip", clipFile: "gruvbox-river.mp4", credit: "@yamzeight", anim: true }
+  { id: "river", file: "River.qml", name: "River", clip: true, description: "A painting that comes alive on unlock", tags: ["motion"], boot: true, bootKind: "clip", clipFile: "gruvbox-river.mp4", credit: "@yamzeight", anim: true },
+  { id: "ticket", file: "Ticket.qml", name: "Ticket", description: "A boarding pass: the time departs, the password is the gate", tags: ["cards", "fun"] },
+  { id: "marquee", file: "Marquee.qml", name: "Marquee", description: "Digits bigger than the screen, cut off at the bottom edge", tags: ["type"] },
+  { id: "meridian", file: "Meridian.qml", name: "Meridian", description: "One line down the middle, time left, day right, field across", tags: ["minimal"] },
+  { id: "blueprint", file: "Blueprint.qml", name: "Blueprint", description: "A drafting sheet: the time dimensioned, a title block, the sign-in as a detail", tags: ["type", "dark"] },
+  { id: "receipt", file: "Receipt.qml", name: "Receipt", description: "The lock screen on till paper: date, time and user as the lines, the PIN to pay", tags: ["type", "fun", "cards"] },
+  { id: "metro", file: "Metro.qml", name: "Metro", description: "The day as a transit line, a station an hour, the train where the time is", tags: ["clock", "type"] },
+  { id: "seismograph", file: "Seismograph.qml", name: "Seismograph", description: "A strip chart that records every key; a wrong password is a quake", tags: ["reactive", "dark"], anim: true },
+  // Seasonal: their own palettes, listed under the Seasonal nav.
+  { id: "ghosts", file: "Ghosts.qml", name: "Ghosts", description: "Sheet ghosts drift over your wallpaper, eyes on the field, a BOO on a wrong password", tags: ["seasonal", "reactive"], anim: true },
+  { id: "cobweb", file: "Cobweb.qml", name: "Cobweb", description: "A dewy web in the corner and a spider that comes down as you type", tags: ["seasonal", "dark", "reactive"], anim: true },
+  { id: "snowfall", file: "Snowfall.qml", name: "Snowfall", description: "Snow over your wallpaper, settling into a drift; a wrong password blows it away", tags: ["seasonal", "reactive"], anim: true },
+  { id: "fairylights", file: "FairyLights.qml", name: "Fairy Lights", description: "Strings of bulbs across the top, one more lit for every key; a wrong password blows the fuse", tags: ["seasonal", "dark", "reactive"], anim: true },
+  { id: "snowglobe", file: "SnowGlobe.qml", name: "Snow Globe", description: "The time inside a snow globe that every key gives a shake", tags: ["seasonal", "clock", "reactive"], anim: true },
 ]
-
-var USER = []
 
 // Not listed in the explorer, used for monitors without input.
 var HIDDEN = [
   { id: "companion", file: "Companion.qml", name: "Companion", description: "Clock only, for secondary monitors", tags: [] }
 ]
 
-// Designs found in ~/.config/omarchy/lock-designs, set by Service.qml.
-function setUser(list) { USER = list || [] }
+// Designs found in ~/.config/omarchy/lock-designs live on Service.userDesigns
+// and are passed in. Module state here is not shared between importing files
+// once the shell's load patch rewrites them, so it must not hold that list.
+function all(user) { return DESIGNS.concat(user || []) }
 
-function all() { return DESIGNS.concat(USER) }
-
-// Lockscreen designs split into two navs: static stylings vs animated ones.
+// Lockscreen designs split into navs: static stylings, animated ones, and
+// seasonal ones of either kind, which get a nav of their own instead of
+// sitting among the rest.
 function isAnimated(d) { return !!(d && (d.anim === true || d.clip === true)) }
-function stylings() { return all().filter(function(d) { return !isAnimated(d) }) }
-function animations() { return all().filter(function(d) { return isAnimated(d) }) }
+function isSeasonal(d) { return !!(d && (d.tags || []).indexOf("seasonal") !== -1) }
+function stylings(user) { return all(user).filter(function(d) { return !isAnimated(d) && !isSeasonal(d) }) }
+function animations(user) { return all(user).filter(function(d) { return isAnimated(d) && !isSeasonal(d) }) }
+function seasonal(user) { return all(user).filter(function(d) { return isSeasonal(d) }) }
 
 function categories() { return CATEGORIES }
 
-function inCategory(category) {
-  if (!category || category === "all") return all()
-  return all().filter(function(d) { return (d.tags || []).indexOf(category) !== -1 })
+function inCategory(category, user) {
+  if (!category || category === "all") return all(user)
+  return all(user).filter(function(d) { return (d.tags || []).indexOf(category) !== -1 })
 }
 
 // Designs with a Plymouth twin in plymouth/<id>/, usable as the boot
@@ -81,20 +120,20 @@ function bootCapable() {
   return DESIGNS.filter(function(d) { return d.boot === true })
 }
 
-function byId(id) {
-  var list = all().concat(HIDDEN)
+function byId(id, user) {
+  var list = all(user).concat(HIDDEN)
   for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i]
   return null
 }
 
-function indexOf(id) {
-  var list = all()
+function indexOf(id, user) {
+  var list = all(user)
   for (var i = 0; i < list.length; i++) if (list[i].id === id) return i
   return -1
 }
 
-function resolve(id) {
-  return byId(id) || byId(DEFAULT_ID) || DESIGNS[0]
+function resolve(id, user) {
+  return byId(id, user) || byId(DEFAULT_ID) || DESIGNS[0]
 }
 
 function fromUserFile(path) {

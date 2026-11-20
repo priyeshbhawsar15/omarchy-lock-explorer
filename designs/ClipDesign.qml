@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import qs.Commons
+import qs.Commons as Commons
 
 // A design built around one clip: its first frame is the lock screen and the
 // rest of it is the unlock. Storm, Eyes, Rally and River are this with
@@ -69,7 +70,7 @@ DesignBase {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: lock.clock("HH:mm")
-        color: Color.lock.text
+        color: Commons.Color.lock.text
         font.family: Style.font.family
         font.pixelSize: Math.round(Style.font.baseSize * 5)
         font.weight: Font.Light
@@ -78,8 +79,8 @@ DesignBase {
 
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
-        text: Qt.formatDate(lock.now, "dddd d MMMM").toUpperCase()
-        color: lock.withAlpha(Color.lock.text, 0.7)
+        text: lock.date("dddd d MMMM").toUpperCase()
+        color: lock.withAlpha(Commons.Color.lock.text, 0.7)
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
         font.letterSpacing: 4
@@ -101,16 +102,16 @@ DesignBase {
         radius: height / 2
         showLockGlyph: false
         shakeOnFail: false
-        placeholder: "Password"
-        color: lock.withAlpha(Color.lock.background, 0.55)
+        placeholder: lock.tr("Password")
+        color: lock.withAlpha(Commons.Color.lock.background, 0.55)
       }
 
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
-        visible: lock.clipName.length > 0 && !still.ready
+        visible: lock.clipName.length > 0 && still.failed
         text: "Missing " + lock.clipName + " in ~/.config/omarchy/lock-videos"
         textFormat: Text.PlainText
-        color: lock.withAlpha(Color.lock.text, 0.55)
+        color: lock.withAlpha(Commons.Color.lock.text, 0.55)
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
         font.letterSpacing: 1

@@ -2,6 +2,8 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+import qs.Commons as Commons
+import "Strings.js" as Strings
 
 Item {
   id: base
@@ -19,10 +21,79 @@ Item {
   property bool fido2Authenticating: false
   property bool fido2NeedsPin: false
   property string fido2Status: ""
+  // What the fingerprint reader is saying, in pam_fprintd's own words, and
+  // whether it is a failure ("Failed to match fingerprint"). Empty while no
+  // scan is running.
+  property string fingerprintStatus: ""
+  property bool fingerprintStatusIsError: false
+
+  // For a design's fingerprint hint: its own wording, unless the reader has
+  // something new to say. The plain "place your finger" prompt repeats after
+  // every attempt and says nothing a design's hint does not; a failed match
+  // does, so that is what replaces it.
+  function fingerprintHint(fallback) {
+    return fingerprintStatusIsError && fingerprintStatus.length > 0 ? fingerprintStatus : fallback
+  }
   property bool authenticatingPassword: false
   property string failureMessage: ""
   property int failedAttempts: 0
   property bool inputEnabled: true
+  // True from the display blanking until it is lit again: keys only wake.
+  property bool inputBlocked: false
+  // The layout being typed on as a short code ("DK"), empty when it could not
+  // be read. PasswordField shows it when it is not a US keyboard, because a
+  // password typed on the wrong layout is invisible otherwise.
+  property string keyboardLayout: ""
+  // Caps lock as Hyprland reports it, seeded at lock and re-read while
+  // someone types. PasswordField says so in the box.
+  property bool capsLock: false
+  signal capsProbeRequested()
+  readonly property bool foreignLayout: keyboardLayout.length > 0 && keyboardLayout !== "US"
+  // More than one layout configured: the badge is shown for US too, and a
+  // click on it asks for the next layout.
+  property int keyboardLayoutCount: 1
+  readonly property bool layoutSwitchable: keyboardLayout.length > 0 && keyboardLayoutCount > 1
+  signal layoutSwitchRequested()
+  // Set by the service while on battery at 15% or less. The warning in the
+  // top right corner is the base's, so every design has it.
+  property bool batteryLow: false
+  property int batteryPercent: -1
+  // A line for whoever finds the computer, set in Settings. The base draws
+  // it bottom left, so every design has it; empty draws nothing.
+  property string ownerMessage: ""
+
+  // Sleep, restart and shut down, off unless the owner turned them on. Every
+  // design gets them from here, in the corner, and each asks a second time
+  // before it happens.
+  property bool powerActions: false
+  signal powerActionRequested(string action)
+
+  // Previous, play or pause, and next for whatever is playing, with its
+  // title, off unless the owner turned it on (Settings > Screen and power >
+  // Media controls). Every design gets the strip from here, top centre. A
+  // design that draws controls of its own turns the strip off with
+  // showMediaStrip and calls mediaAct(); one with something of its own at the
+  // top moves it down with mediaStripAtBottom.
+  property bool mediaControls: false
+  property bool showMediaStrip: true
+  property bool mediaStripAtBottom: false
+  // The corners of the base's own chrome: the media strip and the owner
+  // message. Squarish by default; a design with pills (Island) rounds it, a
+  // designer layout sets it from its Corners slider.
+  property int chromeRadius: 6
+  readonly property alias lockMedia: lockMediaSource
+  LiveMedia { id: lockMediaSource }
+  // "previous", "toggle" or "next". A click on a blanked screen only wakes it.
+  function mediaAct(action) {
+    var blanked = base.inputBlocked
+    base.wakeRequested()
+    if (blanked || !base.mediaControls) return
+    var p = lockMediaSource.player
+    if (!p) return
+    if (action === "previous") { if (p.canGoPrevious) p.previous() }
+    else if (action === "next") { if (p.canGoNext) p.next() }
+    else if (p.canTogglePlaying) p.togglePlaying()
+  }
   property bool loadBackground: true
   property string passwordText: ""
   property string screenName: ""
@@ -34,6 +105,12 @@ Item {
   property string videoPath: ""
   property bool videoPlaying: true
 
+  // False while the display is blanked. Anything that animates should stop
+  // then rather than paint into a dark panel -- effects, canvases, loops.
+  // The field keeps its focus through it, so a key still wakes the screen.
+  property bool screenAwake: true
+  readonly property bool animating: screenAwake && visible
+
   // Raised by the service instead of dropping the lock when the design is
   // built around a clip (see UnlockClip): the clip plays through and
   // unlockFinished() hands the screen back.
@@ -43,6 +120,9 @@ Item {
   signal unlockFinished()
 
   signal submitPassword(string password)
+  // Something drawn over time has come to rest (a ttfx effect, say): under
+  // reduce motion LockHost takes its still frame again.
+  signal stillRequested()
   signal passwordTextEdited(string password)
   signal clearFailureRequested()
   signal wakeRequested()
@@ -52,8 +132,27 @@ Item {
   signal submitFido2Pin(string pin)
 
   readonly property bool errorState: failureMessage.length > 0
-  readonly property string userName: Quickshell.env("USER") || Quickshell.env("LOGNAME") || "user"
-  readonly property string userInitial: userName.length > 0 ? userName.charAt(0).toUpperCase() : "?"
+  // Names shown on the lock screen are held to their plain shape and length
+  // where they come in, whatever Text later shows them.
+  readonly property string userName: {
+    var u = String(Quickshell.env("USER") || Quickshell.env("LOGNAME") || "").replace(/[^A-Za-z0-9._-]/g, "").substring(0, 32)
+    return u.length > 0 ? u : "user"
+  }
+  readonly property string userInitial: displayName.length > 0 ? displayName.charAt(0).toUpperCase() : "?"
+  // The account's full name (the GECOS field), set by the service when there
+  // is one. displayName is what a design greets: its first word, or else the
+  // login name with a capital, so "niklas" reads "Niklas". userName stays the
+  // login itself, for designs that show it as one ("niklas@host", "login:").
+  property string fullName: ""
+  // The full name is free text from the passwd entry, and many designs show
+  // the name in a Text left to guess its format: without < and > it can
+  // never be taken for rich text.
+  readonly property string displayName: {
+    var first = String(fullName || "").replace(/[<>]/g, "").trim().split(/\s+/)[0] || ""
+    if (first.length > 0) return first.substring(0, 40)
+    var u = String(userName || "")
+    return u.length > 0 ? u.charAt(0).toUpperCase() + u.slice(1) : u
+  }
 
   // Set with `omarchy-shell lock pickAvatar` or the A key in the explorer.
   // Designs show it with Avatar, which falls back to userInitial when unset.
@@ -70,12 +169,15 @@ Item {
     var encoded = String(videoPath).split("/").map(encodeURIComponent).join("/")
     return "file://" + encoded
   }
-  property string hostName: Quickshell.env("HOSTNAME") || Quickshell.env("HOST") || "omarchy"
+  function cleanHostName(h) {
+    return String(h || "").trim().replace(/[^A-Za-z0-9.-]/g, "").substring(0, 64)
+  }
+  property string hostName: cleanHostName(Quickshell.env("HOSTNAME") || Quickshell.env("HOST")) || "omarchy"
   FileView {
     path: "/etc/hostname"
     printErrors: false
     onLoaded: {
-      var h = String(text() || "").trim()
+      var h = base.cleanHostName(text())
       if (h.length > 0) base.hostName = h
     }
   }
@@ -87,6 +189,12 @@ Item {
   // disappears entirely. That capture becomes the splash for reboot/shutdown
   // and for stretches of boot with no prompt up, where a box is dead chrome.
   property bool snapshotBare: false
+  // The explorer sets this for a boot snapshot when "Clock on boot screen" is
+  // Hide. A snapshot is a still image shown on later boots, so a clock in it
+  // stays at the time of the grab (issue #74); hideTime is the one switch
+  // designs read to leave their time, date and day-bound parts out of it.
+  property bool snapshotHideClock: false
+  readonly property bool hideTime: snapshotMode && snapshotHideClock
   property Item inputItem: null
   property bool shakeOnFail: false
   property bool flashOnFail: true
@@ -103,6 +211,246 @@ Item {
   onFido2ActiveChanged: if (fido2Active) passwordVisible = false
   onPasswordTextChanged: if (passwordText.length === 0) passwordVisible = false
 
+  // The power row sits above the design but below the fail flash, and is gone
+  // from boot snapshots with the rest of the chrome.
+  Row {
+    id: powerRow
+    z: 900
+    visible: base.powerActions && !base.snapshotMode
+    anchors.right: parent.right
+    anchors.bottom: parent.bottom
+    anchors.rightMargin: 28
+    anchors.bottomMargin: 24
+    spacing: 6
+
+    property string confirming: ""
+
+    Timer {
+      id: powerConfirmTimeout
+      interval: 4000
+      onTriggered: powerRow.confirming = ""
+    }
+
+    component PowerButton: Rectangle {
+      id: powerButton
+      required property string action
+      required property string glyph
+      required property string label
+      readonly property bool asking: powerRow.confirming === action
+      width: asking ? askLabel.implicitWidth + 24 : 34
+      height: 34
+      radius: 17
+      color: asking ? base.withAlpha(Commons.Color.lock.textError, 0.9)
+        : base.withAlpha(Commons.Color.lock.text, powerArea.containsMouse ? 0.18 : 0.08)
+      Behavior on color { ColorAnimation { duration: 120 } }
+      Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+
+      Text {
+        anchors.centerIn: parent
+        visible: !powerButton.asking
+        text: powerButton.glyph
+        color: base.withAlpha(Commons.Color.lock.text, 0.75)
+        font.family: Style.font.family
+        font.pixelSize: 17
+      }
+
+      Text {
+        id: askLabel
+        anchors.centerIn: parent
+        visible: powerButton.asking
+        text: powerButton.label + "?"
+        textFormat: Text.PlainText
+        color: Commons.Color.background
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        font.weight: Font.DemiBold
+      }
+
+      MouseArea {
+        id: powerArea
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: {
+          base.wakeRequested()
+          if (powerButton.asking) {
+            powerRow.confirming = ""
+            powerConfirmTimeout.stop()
+            base.powerActionRequested(powerButton.action)
+            return
+          }
+          powerRow.confirming = powerButton.action
+          powerConfirmTimeout.restart()
+        }
+      }
+    }
+
+    PowerButton { action: "suspend"; glyph: "󰤄"; label: base.tr("Sleep") }
+    PowerButton { action: "reboot"; glyph: "󰜉"; label: base.tr("Restart") }
+    PowerButton { action: "shutdown"; glyph: "󰐥"; label: base.tr("Shut down") }
+  }
+
+  // The media strip, above the design like the power row and gone from boot
+  // snapshots with the rest of the chrome.
+  Rectangle {
+    id: mediaStrip
+    z: 900
+    visible: base.mediaControls && base.showMediaStrip && lockMediaSource.hasMedia && !base.snapshotMode
+    anchors.horizontalCenter: parent.horizontalCenter
+    y: base.mediaStripAtBottom ? parent.height - height - 64 : 24
+    width: mediaRow.implicitWidth + 20
+    height: 40
+    radius: Math.min(20, base.chromeRadius)
+    color: withAlpha(Commons.Color.background, 0.72)
+    border.width: 1
+    border.color: withAlpha(Commons.Color.lock.text, 0.12)
+
+    component MediaButton: Rectangle {
+      id: mediaButton
+      required property string action
+      required property string glyph
+      property bool available: true
+      width: 30
+      height: 30
+      radius: Math.min(15, base.chromeRadius)
+      anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+      opacity: available ? 1 : 0.35
+      color: base.withAlpha(Commons.Color.lock.text, mediaArea.containsMouse && available ? 0.18 : 0.08)
+      Behavior on color { ColorAnimation { duration: 120 } }
+      Text {
+        anchors.centerIn: parent
+        text: mediaButton.glyph
+        color: base.withAlpha(Commons.Color.lock.text, 0.85)
+        font.family: Style.font.family
+        font.pixelSize: 16
+      }
+      MouseArea {
+        id: mediaArea
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: base.mediaAct(mediaButton.action)
+      }
+    }
+
+    Row {
+      id: mediaRow
+      anchors.centerIn: parent
+      spacing: 8
+
+      Rectangle {
+        width: 26
+        height: 26
+        radius: 6
+        anchors.verticalCenter: parent.verticalCenter
+        visible: lockMediaSource.artUrl.length > 0 && mediaArt.status === Image.Ready
+        color: "transparent"
+        clip: true
+        Image {
+          id: mediaArt
+          anchors.fill: parent
+          source: base.mediaControls ? lockMediaSource.artUrl : ""
+          fillMode: Image.PreserveAspectCrop
+          asynchronous: true
+          sourceSize.width: 64
+          sourceSize.height: 64
+        }
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.min(implicitWidth, 320)
+        elide: Text.ElideRight
+        text: lockMediaSource.title + (lockMediaSource.artist.length > 0 ? "  ·  " + lockMediaSource.artist : "")
+        textFormat: Text.PlainText
+        color: Commons.Color.lock.text
+        font.family: Style.font.family
+        font.pixelSize: 13
+      }
+
+      MediaButton {
+        action: "previous"; glyph: "󰒮"
+        available: !!lockMediaSource.player && lockMediaSource.player.canGoPrevious
+      }
+      MediaButton {
+        action: "toggle"; glyph: lockMediaSource.playing ? "󰏤" : "󰐊"
+        available: !!lockMediaSource.player && lockMediaSource.player.canTogglePlaying
+      }
+      MediaButton {
+        action: "next"; glyph: "󰒭"
+        available: !!lockMediaSource.player && lockMediaSource.player.canGoNext
+      }
+    }
+  }
+
+  Rectangle {
+    id: batteryWarning
+    z: 900
+    visible: base.batteryLow && !base.snapshotMode
+    anchors.right: parent.right
+    anchors.top: parent.top
+    anchors.rightMargin: 28
+    anchors.topMargin: 24
+    width: batteryRow.implicitWidth + 24
+    height: 30
+    radius: 15
+    color: withAlpha(Commons.Color.background, 0.72)
+    border.width: 1
+    border.color: withAlpha(Commons.Color.lock.textError, 0.7)
+
+    Row {
+      id: batteryRow
+      anchors.centerIn: parent
+      spacing: 8
+      Text {
+        text: "󰂃"
+        color: Commons.Color.lock.textError
+        font.family: Style.font.family
+        font.pixelSize: 15
+        anchors.verticalCenter: parent.verticalCenter
+      }
+      Text {
+        text: base.tr("Battery low (%1%)").arg(base.batteryPercent)
+        textFormat: Text.PlainText
+        color: Commons.Color.lock.text
+        font.family: Style.font.family
+        font.pixelSize: 13
+        anchors.verticalCenter: parent.verticalCenter
+      }
+    }
+  }
+
+  Rectangle {
+    id: ownerNote
+    z: 900
+    visible: base.ownerMessage.length > 0 && !base.snapshotMode
+    anchors.left: parent.left
+    anchors.bottom: parent.bottom
+    anchors.leftMargin: 28
+    anchors.bottomMargin: 24
+    width: Math.min(ownerText.implicitWidth + 24, Math.round(parent.width * 0.5))
+    height: ownerText.height + 16
+    radius: Math.min(15, base.chromeRadius)
+    color: withAlpha(Commons.Color.background, 0.72)
+    border.width: 1
+    border.color: withAlpha(Commons.Color.lock.text, 0.25)
+
+    Text {
+      id: ownerText
+      anchors.centerIn: parent
+      width: parent.width - 24
+      text: base.ownerMessage
+      textFormat: Text.PlainText
+      wrapMode: Text.Wrap
+      maximumLineCount: 4
+      elide: Text.ElideRight
+      horizontalAlignment: Text.AlignHCenter
+      color: Commons.Color.lock.text
+      font.family: Style.font.family
+      font.pixelSize: 13
+    }
+  }
+
   transform: Translate { id: shakeTranslate }
   SequentialAnimation {
     id: shakeAnim
@@ -116,7 +464,7 @@ Item {
     id: failFlash
     anchors.fill: parent
     z: 1000
-    color: Color.lock.textError
+    color: Commons.Color.lock.textError
     opacity: 0
     visible: opacity > 0
   }
@@ -145,13 +493,36 @@ Item {
   // down through LockHost; designs never read the setting themselves, they
   // render their clock through clock() below.
   property bool twelveHour: false
+  // Set from the wallpaper setting, read by Wallpaper: -1 keeps the blur a
+  // design asks for, and the dim shift is added to the design's own.
+  property real wallpaperBlur: -1
+  property real wallpaperDim: 0
+  // The lock screen's language (see Strings.js), set by the service from the
+  // system locale or the Language setting. tr() gives a design's own text in
+  // it, date() and clock() write month and day names in it.
+  property string language: "en"
+  // Set from Settings > Password field; PasswordField reads them. A design
+  // that draws its own field can read them too.
+  property bool showLayoutBadge: true
+  property bool showCapsBadge: true
+  property bool allowPasswordToggle: true
+  property bool showAuthIcons: true
+  readonly property var dateLocale: Qt.locale(Strings.localeName(language))
+  function tr(text) { return Strings.tr(language, text) }
+  // date() and clock() render empty in a snapshot with the clock hidden (see
+  // hideTime); a date passed in explicitly still shows.
+  function date(spec, when) {
+    if (hideTime && !when) return ""
+    return (when || now).toLocaleString(dateLocale, String(spec))
+  }
 
   // Designs pass their ordinary 24-hour Qt format string here. With the
   // 12-hour setting off it is used as written, so a design that never calls
   // this still behaves exactly as before.
   function clock(spec) {
+    if (hideTime) return ""
     var s = String(spec)
-    if (!twelveHour || s.indexOf("H") === -1) return Qt.formatDateTime(now, s)
+    if (!twelveHour || s.indexOf("H") === -1) return now.toLocaleString(dateLocale, s)
     // An hour standing on its own -- a flip tile, a poster numeral -- has
     // nowhere to put AM/PM, so it just counts 1 to 12. Qt only reads h/hh as
     // 12-hour when the format carries AP, which is why this one is counted by
@@ -162,18 +533,20 @@ Item {
     }
     var out = s.replace(/H{1,2}/, "h")
     if (!/AP|ap/.test(out)) out = out.replace(/h{1,2}(:mm)?(:ss)?/, "$& AP")
-    return Qt.formatDateTime(now, out)
+    return now.toLocaleString(dateLocale, out)
   }
 
   // For designs that lay the meridiem out themselves next to a bare hour.
-  readonly property string meridiem: twelveHour ? Qt.formatDateTime(now, "AP") : ""
+  readonly property string meridiem: !hideTime && twelveHour ? now.toLocaleString(dateLocale, "AP") : ""
 
   function greeting() {
+    // A snapshot with the clock hidden is shown at any hour: no time of day.
+    if (hideTime) return tr("Welcome back")
     var h = now.getHours()
-    if (h < 5) return "Good night"
-    if (h < 12) return "Good morning"
-    if (h < 18) return "Good afternoon"
-    return "Good evening"
+    if (h < 5) return tr("Good night")
+    if (h < 12) return tr("Good morning")
+    if (h < 18) return tr("Good afternoon")
+    return tr("Good evening")
   }
 
   function fileUrl(path) {
@@ -184,6 +557,13 @@ Item {
 
   function withAlpha(c, a) {
     return Qt.rgba(c.r, c.g, c.b, a)
+  }
+
+  // A deeper shade of a theme color for a backdrop. Dark themes take the full
+  // factor; a light theme only dips a little, or it turns to muddy grey.
+  function deepen(c, factor) {
+    var light = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b > 0.5
+    return Qt.darker(c, light ? 1 + (factor - 1) * 0.08 : factor)
   }
 
   function forcePasswordFocus() {

@@ -4,9 +4,13 @@ import Quickshell.Io
 import Quickshell.Services.Pam
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import "Designs.js" as Designs
 import "DisplayPower.js" as DisplayPower
 import "Bridge.js" as Bridge
+import "designs/Strings.js" as Strings
+import "designs/Bounded.js" as Bounded
+import "designs" as Parts
 
 Item {
   id: root
@@ -34,14 +38,14 @@ Item {
   readonly property string designId: designOverride.length > 0 ? designOverride : configuredDesignId
   readonly property bool designHasClip: {
     var r = designsRevision
-    var d = Designs.byId(designId)
+    var d = Designs.byId(designId, userDesigns)
     return !!(d && d.clip)
   }
   // The video file behind the current clip design; user ClipDesigns get their
   // clipFile filled in by the lock-designs scan.
   readonly property string designClipPath: {
     var r = designsRevision
-    var d = Designs.byId(designId)
+    var d = Designs.byId(designId, userDesigns)
     if (!d || !d.clip || !d.clipFile) return ""
     return home + "/.config/omarchy/lock-videos/" + d.clipFile
   }
@@ -164,9 +168,12 @@ Item {
     if (checkOnly) next = powerPhase
     if (!next) return
     var command = ["python3", decodeURIComponent(Qt.resolvedUrl("display-power.py").toString().replace(/^file:\/\//, ""))]
-    phasedPowerProcess.command = next === "wake"
+    // DDC probing and readback across several buses can take a while; the
+    // deadline only stops a helper that has hung, and a failed exit retries.
+    phasedPowerProcess.command = Bounded.run(next === "wake"
       ? command.concat(["wake", displayPowerSettings.main]).concat(displayPowerSettings.sides)
-      : command.concat([checkOnly ? "reconcile" : "policy", next, JSON.stringify(displayPowerSettings)])
+      : command.concat([checkOnly ? "reconcile" : "policy", next, JSON.stringify(displayPowerSettings)]),
+      { deadline: 60 })
     if (next === "wake") powerWakePending = false
     appliedPowerPhase = next
     phasedPowerProcess.running = true
@@ -247,6 +254,90 @@ Item {
     return true
   }
 
+  // How long after the wake has run the password field stays inert, so the
+  // keys that lit a dark panel do not land in the password. Nothing reports a
+  // panel as physically lit, so this is the allowance for one to come up; 0
+  // drops only the keys pressed before the wake ran. Saved on the plugin entry
+  // as `wakeGraceMs`.
+  readonly property int defaultWakeGrace: 1000
+  readonly property int maxWakeGrace: 5000
+  property int wakeGraceOverride: -1
+  readonly property int configuredWakeGrace: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.wakeGraceMs !== undefined)
+        return Math.max(0, Math.min(maxWakeGrace, Number(entry.wakeGraceMs) || 0))
+    }
+    return defaultWakeGrace
+  }
+  readonly property int wakeInputGrace: wakeGraceOverride >= 0 ? wakeGraceOverride : configuredWakeGrace
+
+  // When face unlock starts scanning on its own. "wake" (the default) scans
+  // when a blanked or sleeping panel comes back -- a lid opened, a key
+  // pressed -- but not when the screen is locked while you are sitting in
+  // front of it, which would recognise you and unlock again. "always" scans
+  // as soon as the session locks, "off" leaves it to Enter on an empty field
+  // or the face button. Saved on the plugin entry as `faceStart`.
+  readonly property string defaultFaceStart: "wake"
+  readonly property var faceStartOptions: ["always", "wake", "off"]
+  property string faceStartOverride: ""
+  readonly property string configuredFaceStart: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.faceStart !== undefined) {
+        var value = String(entry.faceStart)
+        if (faceStartOptions.indexOf(value) !== -1) return value
+      }
+    }
+    return defaultFaceStart
+  }
+  readonly property string faceStart: faceStartOverride.length > 0 ? faceStartOverride : configuredFaceStart
+  // "wake" needs a moment that says somebody came back. A panel powering on
+  // is the clear one, but a screen that never blanks (the keep-lit option, or
+  // hardware the display-power helper cannot drive) has none -- so an
+  // interaction a while after the lock counts too. The delay keeps the lock
+  // you just asked for from scanning the face still sitting in front of it.
+  readonly property int faceWakeQuiet: 15000
+  readonly property int faceRoundGap: 10000
+  property real lockedAt: 0
+  property real lastFaceRound: 0
+
+  // Sleep, restart and shut down from the lock screen. Off by default: a
+  // locked machine anyone can reboot is a different trade than a locked
+  // machine that only takes a password, and that is the owner's call. Saved
+  // on the plugin entry as `powerActions`.
+  property int powerActionsOverride: -1
+  readonly property bool configuredPowerActions: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId) return entry.powerActions === true
+    }
+    return false
+  }
+  readonly property bool powerActions: powerActionsOverride >= 0 ? powerActionsOverride === 1 : configuredPowerActions
+
+  // Omarchy's own commands, so a lock screen reboot is the reboot the menu
+  // does. Nothing here runs without the setting on and a second click.
+  // Current Omarchy ships `omarchy-system <reboot|shutdown>`; the standalone
+  // omarchy-system-<action> scripts are only a fallback for older installs.
+  function runPowerAction(action) {
+    if (!powerActions) return false
+    if (action === "suspend") Quickshell.execDetached(["systemctl", "suspend"])
+    else if (action === "reboot" || action === "shutdown")
+      Quickshell.execDetached(["bash", "-c",
+        "if command -v omarchy-system >/dev/null; then exec omarchy-system \"$1\"; else exec \"omarchy-system-$1\"; fi",
+        "bash", action])
+    else return false
+    logEvent("power-action=" + action)
+    return true
+  }
+
   // When true the display stays powered while locked: the DPMS-off is skipped
   // entirely, so video designs keep playing and slow monitors are never
   // re-blanked. Takes precedence over blankDelay. Lives on the plugin entry
@@ -270,7 +361,8 @@ Item {
   // a marker in the runtime dir that the wake removes, so a shell that starts
   // up and finds it knows its predecessor died with the display off, and
   // keeps the displays lit for the rest of this login instead.
-  readonly property string blankMarkerDir: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/omarchy-lock-explorer"
+  // Never /tmp: a shared directory where another account could plant a link.
+  readonly property string blankMarkerDir: (Quickshell.env("XDG_RUNTIME_DIR") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy-lock-explorer"
   property bool blankCrashed: false
 
   // Opt-in HDMI workaround; Never still applies independently on every setup.
@@ -416,6 +508,415 @@ Item {
     return true
   }
 
+  // What `omarchy-shell lock explore` opens: the side panel, which has a
+  // button for the full explorer, or the full explorer straight away. Saved on
+  // the plugin entry as `openAs`. An entry from before the side panel has
+  // settings on it and no `openAs`, and keeps opening the full explorer; a new
+  // install opens the panel. writeEntry() puts the answer on the entry with
+  // the first setting saved, so it does not flip once there is one.
+  property string openAsOverride: ""
+  readonly property string configuredOpenAs: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (!entry || String(entry.id || "") !== pluginId) continue
+      if (entry.openAs === "panel" || entry.openAs === "full") return entry.openAs
+      return settingKeys(entry).length > 0 ? "full" : "panel"
+    }
+    return "panel"
+  }
+  readonly property string openAs: openAsOverride.length > 0 ? openAsOverride : configuredOpenAs
+
+  function setOpenAs(value) {
+    var v = String(value || "")
+    if (v !== "panel" && v !== "full") return false
+    openAsOverride = v
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      current.openAs = v
+      writeEntry(current)
+    }
+    logEvent("open-as=" + v)
+    return true
+  }
+
+  // The side panel's first-open tour has been through, or skipped. Saved on
+  // the plugin entry as `tourSeen`, so it shows once per install.
+  property int tourSeenOverride: -1
+  readonly property bool configuredTourSeen: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.tourSeen !== undefined)
+        return entry.tourSeen === true || String(entry.tourSeen) === "true"
+    }
+    return false
+  }
+  readonly property bool tourSeen: tourSeenOverride >= 0 ? tourSeenOverride === 1 : configuredTourSeen
+
+  function setTourSeen(value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    if (on === tourSeen) return true
+    tourSeenOverride = on ? 1 : 0
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) current.tourSeen = true
+      else delete current.tourSeen
+      writeEntry(current)
+    }
+    return true
+  }
+
+  // After an unlock, a notification for the failed attempts made while you
+  // were away. On by default: it says nothing unless somebody tried. Saved on
+  // the plugin entry as `awayReportOff` only when it is turned off.
+  property int awayReportOverride: -1
+  readonly property bool configuredAwayReport: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.awayReportOff !== undefined)
+        return !(entry.awayReportOff === true || String(entry.awayReportOff) === "true")
+    }
+    return true
+  }
+  readonly property bool awayReport: awayReportOverride >= 0 ? awayReportOverride === 1 : configuredAwayReport
+
+  // Both off by default. Pulling the security key out locks the session, and
+  // plugging it in lights a blanked lock screen ready for a touch. Saved on
+  // the plugin entry as `lockOnKeyRemoval` and `wakeOnKeyInsert`, only when on.
+  property int lockOnKeyRemovalOverride: -1
+  readonly property bool configuredLockOnKeyRemoval: pluginFlag("lockOnKeyRemoval")
+  readonly property bool lockOnKeyRemoval: lockOnKeyRemovalOverride >= 0 ? lockOnKeyRemovalOverride === 1 : configuredLockOnKeyRemoval
+  property int wakeOnKeyInsertOverride: -1
+  readonly property bool configuredWakeOnKeyInsert: pluginFlag("wakeOnKeyInsert")
+  readonly property bool wakeOnKeyInsert: wakeOnKeyInsertOverride >= 0 ? wakeOnKeyInsertOverride === 1 : configuredWakeOnKeyInsert
+
+  // On by default: the reader keeps listening behind a dark panel, so a touch
+  // unlocks it. Off rests the reader until the panel wakes, for readers that
+  // reset on every claim. Saved on the plugin entry as `fingerprintDarkOff`,
+  // only when off.
+  property int fingerprintDarkOffOverride: -1
+  readonly property bool configuredFingerprintDarkOff: pluginFlag("fingerprintDarkOff")
+  readonly property bool fingerprintInDark: !(fingerprintDarkOffOverride >= 0 ? fingerprintDarkOffOverride === 1 : configuredFingerprintDarkOff)
+
+  function pluginFlag(name) {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId) return entry[name] === true
+    }
+    return false
+  }
+
+  function setPluginFlag(name, value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    var off = value === false || value === "false" || value === 0 || value === "0" || value === "off"
+    if (!on && !off) return false
+    if (name === "lockOnKeyRemoval") lockOnKeyRemovalOverride = on ? 1 : 0
+    else if (name === "wakeOnKeyInsert") wakeOnKeyInsertOverride = on ? 1 : 0
+    else if (name === "fingerprintDarkOff") fingerprintDarkOffOverride = on ? 1 : 0
+    else return false
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) current[name] = true
+      else delete current[name]
+      writeEntry(current)
+    }
+    logEvent(name + "=" + (on ? "on" : "off"))
+    return true
+  }
+
+  function setLockOnKeyRemoval(value) { return setPluginFlag("lockOnKeyRemoval", value) }
+  function setWakeOnKeyInsert(value) { return setPluginFlag("wakeOnKeyInsert", value) }
+
+  function setFingerprintInDark(value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    var off = value === false || value === "false" || value === 0 || value === "0" || value === "off"
+    if (!on && !off) return false
+    setPluginFlag("fingerprintDarkOff", !on)
+    if (on) Qt.callLater(startFingerprint)
+    return true
+  }
+
+  function setAwayReport(value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    var off = value === false || value === "false" || value === 0 || value === "0" || value === "off"
+    if (!on && !off) return false
+
+    awayReportOverride = on ? 1 : 0
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) delete current.awayReportOff
+      else current.awayReportOff = true
+      writeEntry(current)
+    }
+    logEvent("away-report=" + (on ? "on" : "off"))
+    return true
+  }
+
+  // When each failed attempt of this lock happened. The ones that run into
+  // the unlock, each within awayGapMs of the next, are the person unlocking
+  // getting it wrong on the way in; anything before that is reported.
+  readonly property int awayGapMs: 30000
+  property var failureTimes: []
+  property var pendingAwayReport: null
+
+  function awayFailures(unlockAt) {
+    var times = failureTimes.slice()
+    var edge = unlockAt
+    while (times.length > 0 && edge - times[times.length - 1] <= awayGapMs)
+      edge = times.pop()
+    return times
+  }
+
+  function sendAwayReport(times) {
+    var count = times.length
+    var last = new Date(times[count - 1])
+    var today = new Date()
+    var locale = Qt.locale(Strings.localeName(language))
+    var clock = last.toLocaleString(locale, twelveHour ? "h:mm AP" : "HH:mm")
+    var when = last.toDateString() === today.toDateString() ? clock : last.toLocaleString(locale, "ddd") + " " + clock
+    var summary = count === 1 ? t("1 failed attempt to unlock") : t("%1 failed attempts to unlock").arg(count)
+    Quickshell.execDetached(["notify-send", "-a", t("Lock screen"), summary,
+                             t("While the screen was locked, the last at %1").arg(when)])
+    logEvent("away-report count=" + count)
+  }
+
+  // Designs starred with F in the explorer, listed under Favorites. Saved on
+  // the plugin entry as `favorites`, a list of design ids, only once there is
+  // one; ids of designs that no longer exist are kept and simply not shown.
+  property var favoritesOverride: null
+  readonly property var configuredFavorites: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && Array.isArray(entry.favorites))
+        return entry.favorites.map(function(id) { return String(id) })
+    }
+    return []
+  }
+  readonly property var favorites: favoritesOverride !== null ? favoritesOverride : configuredFavorites
+
+  function setFavorite(id, on) {
+    var key = String(id || "")
+    if (key.length === 0 || !Designs.byId(key, root.userDesigns)) return false
+    var next = favorites.filter(function(f) { return f !== key })
+    if (on) next.push(key)
+    favoritesOverride = next
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (next.length > 0) current.favorites = next
+      else delete current.favorites
+      writeEntry(current)
+    }
+    logEvent("favorite " + key + "=" + (on ? "on" : "off"))
+    return true
+  }
+
+  function toggleFavorite(id) {
+    return setFavorite(id, favorites.indexOf(String(id || "")) === -1)
+  }
+
+  // What the password field shows beside the text, each shown unless hidden
+  // in Settings. Saved on the plugin entry as hideLayoutBadge, hideCapsBadge,
+  // hidePasswordToggle and hideAuthIcons, and only while hidden.
+  readonly property var fieldItems: ({ layout: "hideLayoutBadge", caps: "hideCapsBadge",
+                                       reveal: "hidePasswordToggle", icons: "hideAuthIcons" })
+  property var fieldItemOverrides: ({})
+  function fieldItemHidden(key) {
+    if (fieldItemOverrides[key] !== undefined) return fieldItemOverrides[key]
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId) return entry[key] === true
+    }
+    return false
+  }
+  readonly property bool showLayoutBadge: !fieldItemHidden("hideLayoutBadge")
+  readonly property bool showCapsBadge: !fieldItemHidden("hideCapsBadge")
+  readonly property bool allowPasswordToggle: !fieldItemHidden("hidePasswordToggle")
+  readonly property bool showAuthIcons: !fieldItemHidden("hideAuthIcons")
+
+  function setFieldItem(name, show) {
+    var key = fieldItems[String(name || "")]
+    if (!key) return false
+    var on = show === true || show === "true" || show === "on" || show === "show" || show === 1
+    var next = {}
+    for (var k in fieldItemOverrides) next[k] = fieldItemOverrides[k]
+    next[key] = !on
+    fieldItemOverrides = next
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) delete current[key]
+      else current[key] = true
+      writeEntry(current)
+    }
+    logEvent("field-" + name + "=" + (on ? "show" : "hide"))
+    return true
+  }
+
+  // The lock screen's language: the system's (LANG, through Qt.locale()) when
+  // Strings.js has it, English otherwise, or one picked in Settings. Saved on
+  // the plugin entry as `language` only once it is picked.
+  readonly property var languages: Strings.LANGUAGES
+  readonly property string systemLanguage: Strings.fromLocale(Qt.locale().name)
+  property string languageOverride: ""
+  readonly property string configuredLanguage: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.language !== undefined && Strings.known(String(entry.language)))
+        return String(entry.language)
+    }
+    return "auto"
+  }
+  readonly property string languageSetting: languageOverride.length > 0 ? languageOverride : configuredLanguage
+  readonly property string language: languageSetting === "auto" ? systemLanguage : languageSetting
+  function t(text) { return Strings.tr(language, text) }
+
+  function setLanguage(value) {
+    var text = String(value === undefined ? "" : value).trim().toLowerCase()
+    if (text !== "auto") text = text === "no" || text === "nn" ? "nb" : text
+    if (text !== "auto" && !Strings.known(text)) return false
+    languageOverride = text
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (text === "auto") delete current.language
+      else current.language = text
+      writeEntry(current)
+    }
+    logEvent("language=" + text)
+    return true
+  }
+
+  // Reduce motion: off, on, or only while on battery. Size: how much larger
+  // than the design drew itself the lock screen is shown. Both are applied by
+  // LockHost to every design, and saved on the plugin entry as `reduceMotion`
+  // and `uiScale` only once they are changed.
+  readonly property var reduceMotionOptions: ["off", "on", "battery"]
+  readonly property var uiScaleOptions: [1, 1.25, 1.5]
+  property string reduceMotionOverride: ""
+  property real uiScaleOverride: 0
+  readonly property string configuredReduceMotion: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && reduceMotionOptions.indexOf(String(entry.reduceMotion)) !== -1)
+        return String(entry.reduceMotion)
+    }
+    return "off"
+  }
+  readonly property real configuredUiScale: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && uiScaleOptions.indexOf(Number(entry.uiScale)) !== -1)
+        return Number(entry.uiScale)
+    }
+    return 1
+  }
+  readonly property string reduceMotion: reduceMotionOverride.length > 0 ? reduceMotionOverride : configuredReduceMotion
+  readonly property real uiScale: uiScaleOverride > 0 ? uiScaleOverride : configuredUiScale
+  readonly property bool onBattery: powerState.item ? powerState.item.onBattery === true : false
+  // A battery running down while the screen is locked is easy to miss: the
+  // lock screen says so at this level or below, on every design, while the
+  // machine is not charging.
+  readonly property int batteryLowAt: 15
+  readonly property int batteryPercent: powerState.item ? powerState.item.percent : -1
+  readonly property bool batteryLow: onBattery && batteryPercent >= 0 && batteryPercent <= batteryLowAt
+  readonly property bool motionReduced: reduceMotion === "on" || (reduceMotion === "battery" && onBattery)
+
+  Loader {
+    id: powerState
+    source: "PowerState.qml"
+  }
+
+  function setReduceMotion(value) {
+    var text = String(value === undefined ? "" : value).trim().toLowerCase()
+    if (text === "true" || text === "1") text = "on"
+    if (text === "false" || text === "0") text = "off"
+    if (reduceMotionOptions.indexOf(text) === -1) return false
+    reduceMotionOverride = text
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (text === "off") delete current.reduceMotion
+      else current.reduceMotion = text
+      writeEntry(current)
+    }
+    logEvent("reduce-motion=" + text)
+    return true
+  }
+
+  function setUiScale(value) {
+    var text = String(value === undefined ? "" : value).trim().replace(/%$/, "")
+    var n = Number(text)
+    if (n >= 50) n = n / 100
+    if (uiScaleOptions.indexOf(n) === -1) return false
+    uiScaleOverride = n
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (n === 1) delete current.uiScale
+      else current.uiScale = n
+      writeEntry(current)
+    }
+    logEvent("ui-scale=" + n)
+    return true
+  }
+
+  // How the wallpaper behind a design looks. Blur replaces the design's own
+  // (sharp, soft or heavy); dim moves the design's own up or down, since some
+  // designs darken the picture a lot to keep their text readable and one
+  // value for all of them would undo that. "design" leaves both alone and is
+  // not written, so the entry only gets `wallpaperBlur` / `wallpaperDim` once
+  // they are changed.
+  readonly property var wallpaperBlurOptions: ({ design: -1, sharp: 0, soft: 0.45, heavy: 1 })
+  readonly property var wallpaperDimOptions: ({ design: 0, lighter: -0.15, darker: 0.2 })
+  property string wallpaperBlurOverride: ""
+  property string wallpaperDimOverride: ""
+  function configuredWallpaperOption(key, options) {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && options[String(entry[key])] !== undefined)
+        return String(entry[key])
+    }
+    return "design"
+  }
+  readonly property string wallpaperBlur: wallpaperBlurOverride.length > 0 ? wallpaperBlurOverride
+                                                                           : configuredWallpaperOption("wallpaperBlur", wallpaperBlurOptions)
+  readonly property string wallpaperDim: wallpaperDimOverride.length > 0 ? wallpaperDimOverride
+                                                                         : configuredWallpaperOption("wallpaperDim", wallpaperDimOptions)
+  readonly property real wallpaperBlurValue: wallpaperBlurOptions[wallpaperBlur]
+  readonly property real wallpaperDimShift: wallpaperDimOptions[wallpaperDim]
+
+  function setWallpaperOption(key, value, options) {
+    var text = String(value === undefined ? "" : value).trim().toLowerCase()
+    if (options[text] === undefined) return false
+    if (key === "wallpaperBlur") wallpaperBlurOverride = text
+    else wallpaperDimOverride = text
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (text === "design") delete current[key]
+      else current[key] = text
+      writeEntry(current)
+    }
+    logEvent(key + "=" + text)
+    return true
+  }
+  function setWallpaperBlur(value) { return setWallpaperOption("wallpaperBlur", value, wallpaperBlurOptions) }
+  function setWallpaperDim(value) { return setWallpaperOption("wallpaperDim", value, wallpaperDimOptions) }
+
   // Security-key unlock, on whenever a key is set up. Saved on the plugin
   // entry as `fido2Off` only when it is turned off, so a setup that never
   // touches this keeps the entry it always had.
@@ -475,8 +976,104 @@ Item {
   // LocalSettings is what keeps two changes made back to back from clobbering
   // each other while the file watcher catches up.
   function writeEntry(entry) {
+    if (entry.openAs === undefined) entry.openAs = root.openAs
     localSettings.remember(entry)
+    saveSettingsBackup(entry)
     return shell.updateEntryInline(pluginId, entry)
+  }
+
+  // A copy of these settings outside ~/.config/omarchy/plugins/. Omarchy drops
+  // a plugin's entry from shell.json when the plugin is removed, so removing
+  // and adding it again -- the usual way out of a broken install -- started
+  // over from every default. Every write is mirrored here, and at startup an
+  // entry with no settings left takes them back from the copy. The copy always
+  // matches the last write, so settings put back to their defaults stay that
+  // way; deleting the file is how to really start over.
+  readonly property string settingsBackupPath: home + "/.config/omarchy/lock-explorer.json"
+  // Keys Omarchy keeps on the entry for itself.
+  readonly property var hostEntryKeys: ["id", "enabled"]
+  property bool settingsRestoreChecked: false
+  // The copy is a few hundred bytes of settings; anything bigger is not it.
+  readonly property int settingsCopyMaxBytes: 65536
+
+  // Writes only. The file is the user's to edit or replace with anything, and
+  // a FileView loads whatever sits at its path: a FIFO would stall the shell
+  // and an oversized file would sit in its memory. Reads go through
+  // settingsCopyRead, which checks the file before handing it over.
+  FileView {
+    id: settingsBackup
+    path: root.settingsBackupPath
+    preload: false
+    atomicWrites: true
+    printErrors: false
+  }
+
+  function settingKeys(entry) {
+    return Object.keys(entry || {}).filter(function(k) { return hostEntryKeys.indexOf(k) === -1 })
+  }
+
+  function saveSettingsBackup(entry) {
+    var copy = {}
+    settingKeys(entry).forEach(function(k) { copy[k] = entry[k] })
+    settingsBackup.setText(JSON.stringify(copy, null, 2) + "\n")
+  }
+
+  // Exit 0 with the file on stdout, 1 when there is nothing at the path,
+  // 2 when what is there is not a plain file (a symlink or FIFO included),
+  // 3 when it is over the cap. The cap bounds the read as well as the
+  // check, so a file growing in between still cannot get past it.
+  Process {
+    id: settingsCopyRead
+    command: Bounded.run(["bash", "-c",
+      "f=$1; max=$2; " +
+      "[ -e \"$f\" ] || [ -L \"$f\" ] || exit 1; " +
+      "[ -f \"$f\" ] && [ ! -L \"$f\" ] || exit 2; " +
+      "[ \"$(stat -c %s -- \"$f\")\" -le \"$max\" ] || exit 3; " +
+      "head -c \"$max\" -- \"$f\"",
+      "bash", root.settingsBackupPath, String(root.settingsCopyMaxBytes)], { deadline: 10, cap: 1048576 })
+    stdout: StdioCollector { id: settingsCopyOut; waitForEnd: true }
+    onExited: function(exitCode) { root.applySettingsCopy(exitCode, String(settingsCopyOut.text || "")) }
+  }
+
+  function restoreSettings() {
+    if (settingsRestoreChecked) return
+    settingsRestoreChecked = true
+    if (!shell || typeof shell.updateEntryInline !== "function") return
+    var current = pluginEntry()
+    if (settingKeys(current).length > 0) {
+      // The entry is the settings; the copy only has to match it. Writing it
+      // here, without reading it first, is also what gives an install from
+      // before the copy existed one.
+      saveSettingsBackup(current)
+      return
+    }
+    settingsCopyRead.running = true
+  }
+
+  function applySettingsCopy(exitCode, text) {
+    if (exitCode === 1) return
+    if (exitCode !== 0) {
+      logEvent("settings-copy-skipped: " + (exitCode === 2 ? "not a plain file" : "over " + settingsCopyMaxBytes + " bytes"))
+      return
+    }
+    var saved = null
+    try { saved = JSON.parse(text) } catch (e) { saved = null }
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return
+    var keys = settingKeys(saved)
+    if (keys.length === 0) return
+    // A setting saved while the copy was being read is newer than the copy.
+    var current = pluginEntry()
+    if (settingKeys(current).length > 0) return
+    keys.forEach(function(k) { current[k] = saved[k] })
+    writeEntry(current)
+    logEvent("settings-restored " + keys.join(","))
+  }
+
+  // Once the entry has been read and the host has settled after a reload.
+  Timer {
+    id: settingsRestoreTimer
+    interval: 2000
+    onTriggered: root.restoreSettings()
   }
 
   function setInputMonitor(name) {
@@ -523,6 +1120,257 @@ Item {
     return true
   }
 
+  // Previous, play or pause, and next on the lock screen for whatever is
+  // playing, with its title. Off by default: a locked screen says nothing
+  // about what is playing unless asked to. Saved on the plugin entry as
+  // `mediaControls`, and only on the screen the password goes in.
+  property int mediaControlsOverride: -1
+  readonly property bool configuredMediaControls: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId) return entry.mediaControls === true
+    }
+    return false
+  }
+  readonly property bool mediaControls: mediaControlsOverride >= 0 ? mediaControlsOverride === 1 : configuredMediaControls
+
+  function setMediaControls(value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    var off = value === false || value === "false" || value === 0 || value === "0" || value === "off"
+    if (!on && !off) return false
+
+    mediaControlsOverride = on ? 1 : 0
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) current.mediaControls = true
+      else delete current.mediaControls
+      writeEntry(current)
+    }
+    logEvent("media-controls=" + (on ? "on" : "off"))
+    return true
+  }
+
+  // The design can follow the Omarchy theme. While this is on, the design
+  // picked in the explorer is remembered for the theme that is active, and a
+  // theme change brings that theme's design back; a theme with nothing
+  // remembered keeps whatever is up. Saved on the plugin entry as `followTheme`
+  // and `themeDesigns` ({ theme name: design id }). Off by default, and the
+  // map stays when it is turned off, so turning it on again finds it.
+  property int followThemeOverride: -1
+  readonly property bool configuredFollowTheme: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId) return entry.followTheme === true
+    }
+    return false
+  }
+  readonly property bool followTheme: followThemeOverride >= 0 ? followThemeOverride === 1 : configuredFollowTheme
+  // The entry may load after the theme name did; the check runs again then.
+  onConfiguredFollowThemeChanged: followThemeDesign()
+  property var themeDesignsOverride: null
+  readonly property var configuredThemeDesigns: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (!entry || String(entry.id || "") !== pluginId) continue
+      var map = entry.themeDesigns
+      return map && typeof map === "object" && !Array.isArray(map) ? map : {}
+    }
+    return {}
+  }
+  readonly property var themeDesigns: themeDesignsOverride ? themeDesignsOverride : configuredThemeDesigns
+
+  // themeDesigns with the current theme set to `id`; also the new override.
+  function rememberThemeDesign(id) {
+    var map = Util.cloneJson(themeDesigns) || {}
+    if (bootCurrentTheme.length > 0) map[bootCurrentTheme] = String(id)
+    themeDesignsOverride = map
+    return map
+  }
+
+  function setFollowTheme(value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    var off = value === false || value === "false" || value === 0 || value === "0" || value === "off"
+    if (!on && !off) return false
+
+    followThemeOverride = on ? 1 : 0
+    // Turning it on starts from the design that is up, so the current theme
+    // has one straight away.
+    var map = on ? rememberThemeDesign(designId) : themeDesigns
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) current.followTheme = true
+      else delete current.followTheme
+      if (Object.keys(map).length > 0) current.themeDesigns = map
+      writeEntry(current)
+    }
+    logEvent("follow-theme=" + (on ? "on" : "off"))
+    return true
+  }
+
+  // On a theme change, and once at startup for a theme switched while the
+  // shell was off: the design remembered for the theme that is now active.
+  function followThemeDesign() {
+    if (!followTheme || rotateDesigns !== "off" || bootCurrentTheme.length === 0) return
+    var want = themeDesigns[bootCurrentTheme]
+    if (!want || String(want) === designId || !Designs.byId(String(want), root.userDesigns)) return
+    logEvent("theme-design " + bootCurrentTheme + " -> " + want)
+    setDesign(String(want))
+  }
+
+  // A line for whoever finds the computer, drawn by DesignBase in the bottom
+  // left corner of every design. Saved on the plugin entry as `ownerMessage`;
+  // empty, the default, draws nothing. Whitespace is collapsed and the
+  // length capped so a corner note stays one.
+  property var ownerMessageOverride: null
+  readonly property string configuredOwnerMessage: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      // The same cap as setOwnerMessage: the file can say anything.
+      if (entry && String(entry.id || "") === pluginId && entry.ownerMessage !== undefined) return String(entry.ownerMessage).substring(0, 120)
+    }
+    return ""
+  }
+  readonly property string ownerMessage: ownerMessageOverride !== null ? ownerMessageOverride : configuredOwnerMessage
+  readonly property int ownerMessageMaxLength: 120
+
+  function setOwnerMessage(value) {
+    var text = String(value === undefined || value === null ? "" : value).replace(/\s+/g, " ").trim()
+    if (text.length > ownerMessageMaxLength) return false
+    ownerMessageOverride = text
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (text.length > 0) current.ownerMessage = text
+      else delete current.ownerMessage
+      writeEntry(current)
+    }
+    logEvent("owner-message=" + (text.length > 0 ? "set" : "cleared"))
+    return true
+  }
+
+  // The favorites can take turns: the next one each time the screen locks,
+  // or a new one each day. Saved on the plugin entry as `rotateDesigns` (lock
+  // or day; absent is off) and, for the daily turn, `rotatedOn`, the day it
+  // last turned. Fewer than two favorites leaves nothing to rotate. While it
+  // is on the rotation has the design, so the theme does not
+  // (followThemeDesign).
+  readonly property var rotateDesignsOptions: ["off", "lock", "day"]
+  property string rotateDesignsOverride: ""
+  readonly property string configuredRotateDesigns: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && (entry.rotateDesigns === "lock" || entry.rotateDesigns === "day"))
+        return entry.rotateDesigns
+    }
+    return "off"
+  }
+  readonly property string rotateDesigns: rotateDesignsOverride.length > 0 ? rotateDesignsOverride : configuredRotateDesigns
+  property string rotatedOnOverride: ""
+  readonly property string configuredRotatedOn: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.rotatedOn) return String(entry.rotatedOn)
+    }
+    return ""
+  }
+  readonly property string rotatedOn: rotatedOnOverride.length > 0 ? rotatedOnOverride : configuredRotatedOn
+
+  function setRotateDesigns(value) {
+    var v = String(value || "")
+    if (rotateDesignsOptions.indexOf(v) === -1) return false
+    rotateDesignsOverride = v
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (v === "off") {
+        delete current.rotateDesigns
+        delete current.rotatedOn
+      } else {
+        current.rotateDesigns = v
+      }
+      writeEntry(current)
+    }
+    logEvent("rotate-designs=" + v)
+    return true
+  }
+
+  function localDay() {
+    var d = new Date()
+    return d.getFullYear() + "-" + ("0" + (d.getMonth() + 1)).slice(-2) + "-" + ("0" + d.getDate()).slice(-2)
+  }
+
+  // As the screen locks: the next favorite, when it is time for one. A
+  // current design that is not a favorite hands over to the first.
+  function rotateDesign() {
+    if (rotateDesigns === "off") return
+    var pool = favorites.filter(function(id) { return !!Designs.byId(id, root.userDesigns) })
+    if (pool.length < 2) return
+    var day = localDay()
+    if (rotateDesigns === "day" && rotatedOn === day) return
+    var next = pool[(pool.indexOf(designId) + 1) % pool.length]
+    if (rotateDesigns === "day") rotatedOnOverride = day
+    logEvent("rotate-design " + designId + " -> " + next)
+    setDesign(next, rotateDesigns === "day" ? day : "turn")
+  }
+
+  function setPowerActions(value) {
+    var on = value === true || value === "true" || value === 1 || value === "1" || value === "on"
+    var off = value === false || value === "false" || value === 0 || value === "0" || value === "off"
+    if (!on && !off) return false
+
+    powerActionsOverride = on ? 1 : 0
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (on) current.powerActions = true
+      else delete current.powerActions
+      writeEntry(current)
+    }
+    logEvent("power-actions=" + (on ? "on" : "off"))
+    return true
+  }
+
+  function setFaceStart(value) {
+    var text = String(value === undefined ? "" : value).trim().toLowerCase()
+    if (faceStartOptions.indexOf(text) === -1) return false
+
+    faceStartOverride = text
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (text === defaultFaceStart) delete current.faceStart
+      else current.faceStart = text
+      writeEntry(current)
+    }
+    logEvent("face-start=" + text)
+    if (text === "off") stopFace()
+    return true
+  }
+
+  function setWakeGrace(ms) {
+    var text = String(ms === undefined ? "" : ms).trim()
+    var value = Math.round(Number(text))
+    if (text.length === 0 || !isFinite(value) || value < 0 || value > maxWakeGrace) return false
+
+    wakeGraceOverride = value
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (value === defaultWakeGrace) delete current.wakeGraceMs
+      else current.wakeGraceMs = value
+      writeEntry(current)
+    }
+    logEvent("wake-grace=" + value)
+    return true
+  }
+
   function setBlankDelay(ms) {
     var text = String(ms === undefined ? "" : ms).trim()
     var value = Math.round(Number(text))
@@ -540,7 +1388,9 @@ Item {
   }
 
   function setKeepDisplayOn(on) {
-    var value = on === true || on === 1 || on === "true"
+    var value = on === true || on === "true" || on === 1 || on === "1" || on === "on"
+    var off = on === false || on === "false" || on === 0 || on === "0" || on === "off"
+    if (!value && !off) return false
     keepDisplayOnOverride = value ? 1 : 0
     if (shell && typeof shell.updateEntryInline === "function") {
       var current = pluginEntry()
@@ -573,6 +1423,9 @@ Item {
 
   readonly property string userDesignsDir: home + "/.config/omarchy/lock-designs"
   property int designsRevision: 0
+  // Designs found in userDesignsDir, see Designs.fromUserFile. Every reader
+  // gets this list passed in rather than reading Designs.js module state.
+  property var userDesigns: []
 
   function rescanUserDesigns() {
     if (!userDesignsProc.running) userDesignsProc.running = true
@@ -584,9 +1437,9 @@ Item {
   Process {
     id: shippedClipsProc
     running: true
-    command: ["bash", "-c",
+    command: Bounded.run(["bash", "-c",
       "dst=\"$HOME/.config/omarchy/lock-videos\"; mkdir -p \"$dst\"; for f in \"$0\"/videos/*.mp4; do [ -e \"$f\" ] || continue; b=$(basename \"$f\"); [ -e \"$dst/$b\" ] || ln -s \"$f\" \"$dst/$b\"; done",
-      root.pluginDir]
+      root.pluginDir], { deadline: 30 })
   }
 
   // Bumps the revision so every LockHost showing a user design reloads it.
@@ -599,6 +1452,141 @@ Item {
     return decodeURIComponent(u.replace(/^file:\/\//, "")).replace(/\/$/, "")
   }
 
+  // A timestamped backup copy left in ~/.config/omarchy/plugins/ is found as a
+  // second plugin with this same id, and which of the two the shell loads is
+  // not something either copy decides. It costs an afternoon to work out from
+  // the symptoms, so say it plainly at startup (issue #29).
+  property var shadowingDirs: []
+
+  Process {
+    id: duplicatePluginProc
+    // The id is matched in the manifest rather than parsed out of it: a
+    // grep says whether this file claims the same id, which is the whole
+    // question. Hidden directories count, and a backup copy is usually one.
+    command: Bounded.run(["bash", "-c",
+      "find \"$1\" -mindepth 2 -maxdepth 2 -name manifest.json -type f 2>/dev/null | while read -r m; do " +
+      "grep -D skip -q \"\\\"id\\\"[[:space:]]*:[[:space:]]*\\\"$2\\\"\" \"$m\" && dirname \"$m\"; done",
+      "bash", Quickshell.env("HOME") + "/.config/omarchy/plugins", root.pluginId], { deadline: 15, cap: 1048576 })
+    stdout: StdioCollector { id: duplicatePluginStdout; waitForEnd: true }
+    onExited: {
+      var found = String(duplicatePluginStdout.text || "").split("\n")
+        .map(function(line) { return line.trim().replace(/\/$/, "") })
+        .filter(function(line) { return line.length > 0 && line !== root.pluginDir })
+      root.shadowingDirs = found
+      if (found.length === 0) return
+      root.logEvent("shadowed-by " + found.join(" "))
+      console.warn("lock-explorer: another copy of this plugin is installed under the same id and"
+        + " may load instead of this one: " + found.join(", ")
+        + ". Move it out of ~/.config/omarchy/plugins/ (a backup belongs anywhere else).")
+    }
+  }
+
+  // Another enabled plugin that also replaces omarchy.lock registers the same
+  // `lock` IPC target. Whichever loads first keeps it, so `omarchy-shell lock
+  // explore` answers "Function not found" and nothing in the shell says why
+  // (issue #41). Ask the shell which plugins are on and name the other one.
+  property var rivalLockPlugins: []
+  property bool rivalLockNotified: false
+
+  Timer {
+    id: rivalLockCheckTimer
+    // After the shell has settled; right after a reload it may still list the
+    // stock lock being swapped out.
+    interval: 5000
+    onTriggered: if (!rivalLockProc.running) rivalLockProc.running = true
+  }
+
+  Process {
+    id: rivalLockProc
+    command: Bounded.run(["omarchy-shell", "shell", "listPlugins"], { deadline: 15, cap: 1048576 })
+    stdout: StdioCollector { id: rivalLockStdout; waitForEnd: true }
+    onExited: {
+      var plugins = []
+      try { plugins = JSON.parse(String(rivalLockStdout.text || "[]")) } catch (e) { return }
+      if (!Array.isArray(plugins)) return
+      var found = plugins.filter(function(p) {
+        return p && p.enabled === true && String(p.clonedFrom || "") === "omarchy.lock"
+          && String(p.id || "") !== root.pluginId
+      }).map(function(p) { return String(p.id) })
+      root.rivalLockPlugins = found
+      if (found.length === 0) return
+      root.logEvent("rival-lock " + found.join(" "))
+      console.warn("lock-explorer: another lock screen plugin is enabled and may own the `lock` IPC target: "
+        + found.join(", ") + ". Keep one: omarchy plugin disable " + found[0] + " && omarchy restart shell")
+      if (root.rivalLockNotified) return
+      root.rivalLockNotified = true
+      Quickshell.execDetached(["notify-send", "-a", "Lock Screen Explorer", found.join(", ") + " is also enabled",
+        "Two lock screen plugins are on. Keep one:\nomarchy plugin disable " + found[0] + "\nomarchy restart shell"])
+    }
+  }
+
+  // What the explorer's Settings offers when something is missing. Both run
+  // in a terminal the user can see: pacman asks for the password there, and
+  // the doctor's report stays on screen until a key is pressed. Only the
+  // packages the plugin itself uses can be asked for.
+  readonly property var installablePackages: ["qt6-multimedia", "qt6-imageformats"]
+  readonly property string doctorPath: pluginDir + "/extras/doctor.sh"
+
+  function shellQuote(text) { return "'" + String(text).replace(/'/g, "'\\''") + "'" }
+
+  // The terminal is Omarchy's floating one. Whether it came up is read off
+  // Hyprland's window list: a terminal that cannot start (Ghostty without
+  // OpenGL 4.3, a missing default) would otherwise close the explorer onto
+  // nothing at all, so then a notification gives the command to run by hand.
+  property string terminalFallback: ""
+  Process {
+    id: terminalProc
+    onExited: function(exitCode) {
+      if (exitCode === 0) return
+      root.logEvent("terminal-missing")
+      Quickshell.execDetached(["notify-send", "-a", "Lock Screen Explorer", "No terminal opened",
+                               "Run this in a terminal instead:\n" + root.terminalFallback])
+    }
+  }
+
+  function openInTerminal(command, fallback) {
+    if (terminalProc.running) return false
+    terminalFallback = fallback || command
+    terminalProc.command = Bounded.run(["bash", "-c", "count() { hyprctl clients -j 2>/dev/null | jq '[.[] | select(.class == \"org.omarchy.terminal\")] | length' 2>/dev/null; }; launch() { setsid -f omarchy-launch-floating-terminal-with-presentation \"$1\" >/dev/null 2>&1; }; if ! command -v hyprctl >/dev/null || ! command -v jq >/dev/null; then launch \"$1\"; exit 0; fi; before=$(count); before=${before:-0}; launch \"$1\"; for _ in $(seq 24); do sleep 0.25; now=$(count); (( ${now:-0} > before )) && exit 0; done; exit 1", "bash", command], { deadline: 30 })
+    terminalProc.running = true
+    return true
+  }
+
+  function installPackages(names) {
+    var list = (names || []).map(String).filter(function(n) { return installablePackages.indexOf(n) !== -1 })
+    if (list.length === 0) return false
+    openInTerminal("omarchy-pkg-add " + list.join(" ") + " && omarchy restart shell",
+                   "omarchy pkg add " + list.join(" ") + " && omarchy restart shell")
+    logEvent("install " + list.join(" "))
+    return true
+  }
+
+  // A second copy of the plugin found at startup (shadowingDirs), moved out of
+  // the plugins folder by the doctor's --fix, which only ever moves what its
+  // own check found. The check runs again after, so the warning goes.
+  property bool movingCopies: false
+  Process {
+    id: moveCopiesProc
+    command: Bounded.run(["bash", root.doctorPath, "--fix"], { deadline: 60 })
+    onExited: {
+      root.movingCopies = false
+      root.logEvent("doctor-fix exit=" + exitCode)
+      duplicatePluginProc.running = true
+    }
+  }
+  function moveCopies() {
+    if (moveCopiesProc.running || shadowingDirs.length === 0) return false
+    movingCopies = true
+    moveCopiesProc.running = true
+    return true
+  }
+
+  function runDoctor() {
+    openInTerminal("bash " + shellQuote(doctorPath), "bash " + shellQuote(doctorPath))
+    logEvent("doctor")
+    return true
+  }
+
   readonly property string checkFaceAuthPath: pluginDir + "/check-face-auth.sh"
   readonly property string checkFido2AuthPath: pluginDir + "/check-fido2-auth.sh"
 
@@ -607,6 +1595,26 @@ Item {
   // the Settings tab's "Omarchy menu" row and `omarchy-shell lock setMenuEntry`
   // run extras/install.sh, which also takes them out again.
   readonly property string menuInstallPath: pluginDir + "/extras/install.sh"
+  // The lock in the bar (BarWidget.qml), a custom module in the bar layout
+  // of shell.json put there by extras/bar-icon.sh: the Settings tab's "Bar
+  // icon" row and `omarchy-shell lock setBarIcon on`. Whether it is there is
+  // read off the file, which the shell rewrites when the layout changes.
+  readonly property string barIconPath: pluginDir + "/extras/bar-icon.sh"
+  readonly property bool barIconShown: localSettings.barHasWidget
+
+  function setBarIcon(v) {
+    var on = v === true || v === 1 || v === "true" || v === "on" || v === "1"
+    if (barIconApplyProc.running) return false
+    barIconApplyProc.command = Bounded.run(on ? ["bash", barIconPath] : ["bash", barIconPath, "--remove"], { deadline: 30 })
+    barIconApplyProc.running = true
+    logEvent("bar-icon=" + (on ? "on" : "off"))
+    return true
+  }
+
+  Process {
+    id: barIconApplyProc
+    onExited: localSettings.reload()
+  }
 
   // Every embedded script that writes a file of the user's sources this first
   // (it arrives as the script's $0): an owner-checked, symlink-free directory
@@ -621,7 +1629,7 @@ Item {
   function setMenuEntry(v) {
     var on = v === true || v === 1 || v === "true" || v === "on" || v === "1"
     if (menuEntryApplyProc.running) return false
-    menuEntryApplyProc.command = on ? [menuInstallPath] : [menuInstallPath, "--remove"]
+    menuEntryApplyProc.command = Bounded.run(on ? [menuInstallPath] : [menuInstallPath, "--remove"], { deadline: 30 })
     menuEntryApplyProc.running = true
     logEvent("menu-entry=" + (on ? "on" : "off"))
     return true
@@ -629,7 +1637,7 @@ Item {
 
   Process {
     id: menuEntryStatusProc
-    command: [root.menuInstallPath, "--status"]
+    command: Bounded.run([root.menuInstallPath, "--status"], { deadline: 15, cap: 65536 })
     stdout: StdioCollector { id: menuEntryStatusOut; waitForEnd: true }
     onExited: root.menuEntryInstalled = String(menuEntryStatusOut.text || "").trim() === "installed"
   }
@@ -641,24 +1649,35 @@ Item {
 
   signal designCustomized(string id, string path)
 
-  function customizeDesign(id) {
+  // A stock design you have customized before opens that copy, the newest if
+  // there are several; `fresh` makes a new copy anyway.
+  function customizeDesign(id, fresh) {
     var d = String(id || "") === "new"
       ? { id: "new", file: "MyDesign.qml", name: "new", template: true }
-      : Designs.byId(String(id || ""))
+      : Designs.byId(String(id || ""), root.userDesigns)
     if (!d) return false
     if (d.path) { designCustomized(d.id, decodeURIComponent(d.path.replace(/^file:\/\//, ""))); return true }
     var source = d.template ? pluginDir + "/extras/lock-designs/" + d.file : pluginDir + "/designs/" + d.file
     if (customizeProc.running) return false
     var importLine = 'import "../plugins/' + pluginId + '/designs"'
-    customizeProc.command = ["bash", "-c", customizeScript, safePathsLib, source, userDesignsDir, d.file.replace(/\.qml$/, ""), d.template ? "" : importLine, d.name]
+    customizeProc.command = Bounded.run(["bash", "-c", customizeScript, safePathsLib, source, userDesignsDir, d.file.replace(/\.qml$/, ""), d.template ? "" : importLine, d.name, fresh || d.template ? "fresh" : ""], { deadline: 30, cap: 65536 })
     customizeProc.running = true
     return true
   }
 
   readonly property string customizeScript: '
 set -e; source "$0"
-src="$1"; dir="$2"; base="$3"; imp="$4"; name="$5"
+src="$1"; dir="$2"; base="$3"; imp="$4"; name="$5"; fresh="$6"
 safe_dir "$dir"
+if [[ $fresh != fresh ]]; then
+  copy=""
+  for f in "$dir"/*.qml; do
+    [[ -f $f && ! -L $f ]] || continue
+    [[ $(head -c 200 -- "$f" | head -n 1) == "// Customized copy of the $name design."* ]] || continue
+    if [[ -z $copy || $f -nt $copy ]]; then copy=$f; fi
+  done
+  if [[ -n $copy ]]; then echo "$copy"; exit 0; fi
+fi
 target="$dir/$base.qml"; n=2
 while [[ -e "$target" ]]; do target="$dir/$base$n.qml"; n=$((n+1)); done
 {
@@ -682,8 +1701,10 @@ echo "$target"
         var target = String(customizeOut.text || "").trim()
         if (target.length === 0) return
         var d = Designs.fromUserFile(target)
-        Designs.setUser(Designs.USER.concat([d]))
-        root.designsRevision += 1
+        if (!Designs.byId(d.id, root.userDesigns)) {
+          root.userDesigns = root.userDesigns.concat([d])
+          root.designsRevision += 1
+        }
         root.designCustomized(d.id, target)
         root.rescanUserDesigns()
       }
@@ -703,7 +1724,7 @@ echo "$target"
   // into the designer on it.
   function createDesignerDesign(content) {
     if (designerCreateProc.running) return false
-    designerCreateProc.command = ["bash", "-c", designerCreateScript, safePathsLib, userDesignsDir, String(content)]
+    designerCreateProc.command = Bounded.run(["bash", "-c", designerCreateScript, safePathsLib, userDesignsDir, String(content)], { deadline: 30, cap: 65536 })
     designerCreateProc.running = true
     return true
   }
@@ -728,7 +1749,7 @@ echo "$target"
         if (target.length === 0) return
         var d = Designs.fromUserFile(target)
         d.designer = true
-        Designs.setUser(Designs.USER.concat([d]))
+        root.userDesigns = root.userDesigns.concat([d])
         root.designsRevision += 1
         root.designerDesignCreated(d.id, target)
         root.rescanUserDesigns()
@@ -754,8 +1775,9 @@ echo "$target"
     var safe = String(slug || "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
     if (safe.length === 0 || String(json || "").length === 0) return false
     if (componentSaveProc.running) return false
-    componentSaveProc.command = ["bash", "-c",
-      'mkdir -p "$1" && printf %s "$3" > "$1/$2.json"', "savecomponent", componentsDir, safe, String(json)]
+    if (String(json).length > 65536) return false
+    componentSaveProc.command = Bounded.run(["bash", "-c",
+      'source "$4" && safe_dir "$1" && printf %s "$3" | put_file "$1" "$2.json"', "savecomponent", componentsDir, safe, String(json), safePathsLib], { deadline: 15 })
     componentSaveProc.running = true
     logEvent("component-saved=" + safe)
     return true
@@ -765,8 +1787,8 @@ echo "$target"
     var safe = String(slug || "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "")
     if (safe.length === 0) return false
     if (componentDeleteProc.running) return false
-    componentDeleteProc.command = ["bash", "-c",
-      'rm -f -- "$1/$2.json"', "delcomponent", componentsDir, safe]
+    componentDeleteProc.command = Bounded.run(["bash", "-c",
+      'rm -f -- "$1/$2.json"', "delcomponent", componentsDir, safe], { deadline: 15 })
     componentDeleteProc.running = true
     logEvent("component-deleted=" + safe)
     return true
@@ -777,10 +1799,11 @@ echo "$target"
     running: true
     // slug<TAB>json, one component per line. The files the designer writes
     // have no newlines in them; tr keeps a hand-edited one from splitting the
-    // listing across lines.
-    command: ["bash", "-c",
-      'dir="$1"; mkdir -p "$dir"; for f in "$dir"/*.json; do [ -e "$f" ] || continue; printf "%s\\t" "$(basename "$f" .json)"; tr -d "\\n" < "$f"; printf "\\n"; done',
-      "components", root.componentsDir]
+    // listing across lines. Plain files of at most 64 KiB only: a FIFO or a
+    // huge file would hold the scan up.
+    command: Bounded.run(["bash", "-c",
+      'dir="$1"; mkdir -p "$dir"; for f in "$dir"/*.json; do [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %s -- "$f")" -le 65536 ] || continue; printf "%s\\t" "$(basename "$f" .json)"; head -c 65536 -- "$f" | tr -d "\\n"; printf "\\n"; done',
+      "components", root.componentsDir], { deadline: 15, cap: 1048576 })
     stdout: StdioCollector {
       id: componentsOut
       waitForEnd: true
@@ -829,7 +1852,7 @@ echo "$target"
 
   Process {
     id: imagePickProc
-    command: ["omarchy-file-select", "--title", "Pick an image for the design", "--extensions", "png jpg jpeg webp svg"]
+    command: Bounded.run(["omarchy-file-select", "--title", "Pick an image for the design", "--extensions", "png jpg jpeg webp svg"], { deadline: 1800, cap: 65536 })
     stdout: StdioCollector {
       id: imagePickOut
       waitForEnd: true
@@ -903,7 +1926,7 @@ done
 
   Process {
     id: detectAvatarProc
-    command: ["bash", "-c", root.detectAvatarScript]
+    command: Bounded.run(["bash", "-c", root.detectAvatarScript], { deadline: 15, cap: 65536 })
     stdout: StdioCollector {
       id: detectAvatarOut
       waitForEnd: true
@@ -919,7 +1942,7 @@ done
 
   Process {
     id: avatarPickProc
-    command: ["omarchy-file-select", "--title", "Pick a lock screen avatar", "--extensions", "png jpg jpeg webp"]
+    command: Bounded.run(["omarchy-file-select", "--title", "Pick a lock screen avatar", "--extensions", "png jpg jpeg webp"], { deadline: 1800, cap: 65536 })
     stdout: StdioCollector {
       id: avatarPickOut
       waitForEnd: true
@@ -991,11 +2014,11 @@ done
     if (videoPickProc.running) return false
     videoPickTarget = String(target || "video")
     videoPickReopens = reopenExplorer === true
-    videoPickProc.command = ["omarchy-file-select",
+    videoPickProc.command = Bounded.run(["omarchy-file-select",
       "--title", videoPickTarget === "sting" ? "Pick an unlock clip"
         : videoPickTarget === "clip" ? "Pick a video for a new clip design"
         : "Pick a lock screen video",
-      "--extensions", "mp4 mkv webm mov m4v"]
+      "--extensions", "mp4 mkv webm mov m4v"], { deadline: 1800, cap: 65536 })
     videoPickProc.running = true
     return true
   }
@@ -1029,8 +2052,8 @@ done
     if (src.indexOf("file://") === 0) src = decodeURIComponent(src.replace(/^file:\/\//, ""))
     if (src.length === 0 || clipDesignProc.running) return false
     var importLine = 'import "../plugins/' + pluginId + '/designs"'
-    clipDesignProc.command = ["bash", "-c", clipDesignScript, safePathsLib,
-      src, home + "/.config/omarchy/lock-videos", userDesignsDir, importLine]
+    clipDesignProc.command = Bounded.run(["bash", "-c", clipDesignScript, safePathsLib,
+      src, home + "/.config/omarchy/lock-videos", userDesignsDir, importLine], { deadline: 900, cap: 65536 })
     clipDesignProc.running = true
     return true
   }
@@ -1080,7 +2103,7 @@ printf "%s\\t%s\\n" "$target" "$base"
         d.anim = true
         d.clip = true
         if (parts.length > 1 && parts[1].trim().length > 0) d.clipFile = parts[1].trim()
-        Designs.setUser(Designs.USER.concat([d]))
+        root.userDesigns = root.userDesigns.concat([d])
         root.designsRevision += 1
         root.rescanUserDesigns()
         root.clipDesignAdded(d.id)
@@ -1089,15 +2112,38 @@ printf "%s\\t%s\\n" "$target" "$base"
     }
   }
 
+  // Names that are joined into a path under one of the plugin's folders. They
+  // arrive over IPC (any process of the account can call it), from the saved
+  // settings and from design files, so they are held to a pattern instead of
+  // trusted: no separator, no leading dot, no "..".
+  function fileItemNameValid(n) {
+    var v = String(n || "")
+    return /^[A-Za-z0-9_-][A-Za-z0-9._ -]{0,127}$/.test(v) && v.indexOf("..") === -1
+  }
+  function layoutNameValid(n) {
+    return /^[A-Za-z0-9_-]{1,64}$/.test(String(n || ""))
+  }
+  // A boot option: a design id, or video:/custom:/snapshot: and a name.
+  function bootItemValid(v) {
+    v = String(v || "")
+    if (v.indexOf("custom:") === 0) return layoutNameValid(v.substring(7))
+    if (v.indexOf("video:") === 0) return fileItemNameValid(v.substring(6))
+    if (v.indexOf("snapshot:") === 0) return fileItemNameValid(v.substring(9))
+    return /^[a-z0-9-]{1,32}$/.test(v)
+  }
+
   // Delete a user design from ~/.config/omarchy/lock-designs. A clip design's
   // video goes with it, unless the boot screen, the Motion video or the unlock
   // clip still point at it, or another design names it.
   function deleteDesign(id) {
-    var d = Designs.byId(String(id || ""))
+    var d = Designs.byId(String(id || ""), root.userDesigns)
     if (!d || !d.path) return false
     var file = decodeURIComponent(String(d.path).replace(/^file:\/\//, ""))
     if (file.indexOf(userDesignsDir + "/") !== 0) return false
+    // The clip name is whatever the design file says; only a plain file name
+    // in lock-videos is ever deleted along with it.
     var clip = String(d.clipFile || "")
+    if (!fileItemNameValid(clip)) clip = ""
     if (clip.length > 0) {
       var tail = "/" + clip
       var keep = bootSetting === "video:" + clip
@@ -1106,8 +2152,8 @@ printf "%s\\t%s\\n" "$target" "$base"
       if (keep) clip = ""
     }
     if (designId === d.id) setDesign(Designs.DEFAULT_ID)
-    deleteDesignProc.command = ["bash", "-c", deleteDesignScript, "deldesign",
-      file, home + "/.config/omarchy/lock-videos", clip, userDesignsDir]
+    deleteDesignProc.command = Bounded.run(["bash", "-c", deleteDesignScript, "deldesign",
+      file, home + "/.config/omarchy/lock-videos", clip, userDesignsDir], { deadline: 30 })
     deleteDesignProc.running = true
     logEvent("delete-design=" + d.id)
     return true
@@ -1117,7 +2163,7 @@ printf "%s\\t%s\\n" "$target" "$base"
 set -e
 file="$1"; videos="$2"; clip="$3"; dir="$4"
 rm -f -- "$file"
-if [[ -n $clip ]] && ! grep -qs -- "$clip" "$dir"/*.qml 2>/dev/null; then
+if [[ -n $clip ]] && ! grep -D skip -qs -- "$clip" "$dir"/*.qml 2>/dev/null; then
   rm -f -- "$videos/$clip"
 fi
 '
@@ -1137,16 +2183,17 @@ fi
   function deleteBootItem(id) {
     var v = String(id || "")
     if (v.indexOf("video:") !== 0 && v.indexOf("custom:") !== 0) return false
+    if (!bootItemValid(v)) return false
     if (v.indexOf("video:") === 0) {
       var tail = "/" + v.substring(6)
       if ((videoPath.length >= tail.length && videoPath.lastIndexOf(tail) === videoPath.length - tail.length)
         || (stingPath.length >= tail.length && stingPath.lastIndexOf(tail) === stingPath.length - tail.length)) return false
     }
     if (bootSetting === v) setBoot("stock")
-    deleteBootItemProc.command = ["bash", "-c", deleteBootItemScript, "delboot",
+    deleteBootItemProc.command = Bounded.run(["bash", "-c", deleteBootItemScript, "delboot",
       v, home + "/.config/omarchy/lock-videos", home + "/.config/omarchy/boot-designs",
       home + "/.config/omarchy/lock-designs",
-      home + "/.local/state/omarchy/lock-explorer-boot-previews"]
+      home + "/.local/state/omarchy/lock-explorer-boot-previews"], { deadline: 30 })
     deleteBootItemProc.running = true
     logEvent("delete-boot=" + v)
     return true
@@ -1155,6 +2202,8 @@ fi
   readonly property string deleteBootItemScript: '
 set -e
 id="$1"; videos="$2"; bootdir="$3"; lockdir="$4"; previews="$5"
+# The caller checks the name too; a separator or a dot-dot never gets here.
+case "${id#*:}" in */* | .* | *..* | "") exit 1 ;; esac
 case "$id" in
   video:*)
     f="${id#video:}"
@@ -1238,8 +2287,8 @@ esac
     if (!clipWallpaper || !path || String(path).length === 0) return
     if (clipWallPrepProc.running) return
     preparedClipWallpaper = ""
-    clipWallPrepProc.command = ["bash", "-c", clipWallScript, safePathsLib,
-      String(path), home + "/.local/state/omarchy/lock-explorer-clip-wallpapers"]
+    clipWallPrepProc.command = Bounded.run(["bash", "-c", clipWallScript, safePathsLib,
+      String(path), home + "/.local/state/omarchy/lock-explorer-clip-wallpapers"], { deadline: 300, cap: 65536 })
     clipWallPrepProc.running = true
   }
 
@@ -1258,8 +2307,10 @@ out="$dir/$stem.png"
 if [[ ! -s "$out" || "$src" -nt "$out" ]]; then
   tmp=$(mktemp --suffix=.png)
   trap "rm -f -- $tmp" EXIT
-  ffmpeg -y -loglevel error -sseof -1 -i "$src" -update 1 "$tmp" || true
-  [[ -s "$tmp" ]] || ffmpeg -y -loglevel error -i "$src" -update 1 "$tmp"
+  # A local video container from a file only, as in plymouth/cliptwin.sh.
+  clip_in=(-protocol_whitelist file -format_whitelist mov,mp4,m4a,3gp,3g2,mj2,matroska,webm)
+  ffmpeg -y -loglevel error -sseof -1 "${clip_in[@]}" -i "$src" -update 1 "$tmp" || true
+  [[ -s "$tmp" ]] || ffmpeg -y -loglevel error "${clip_in[@]}" -i "$src" -update 1 "$tmp"
   put_file "$dir" "$stem.png" < "$tmp"
 fi
 echo "$out"
@@ -1295,8 +2346,9 @@ echo "$out"
   readonly property string bootSetting: {
     var value = bootOverride.length > 0 ? bootOverride : configuredBoot
     if (value === "follow" || value === "stock" || value === "theme" || value === "rotate") return value
-    if (value.indexOf("snapshot:") === 0 || value.indexOf("video:") === 0 || value.indexOf("custom:") === 0) return value
-    var d = Designs.byId(value)
+    if (value.indexOf("snapshot:") === 0 || value.indexOf("video:") === 0 || value.indexOf("custom:") === 0)
+      return bootItemValid(value) ? value : "stock"
+    var d = Designs.byId(value, root.userDesigns)
     return d && d.boot === true ? value : "stock"
   }
   property bool bootApplying: false
@@ -1309,7 +2361,7 @@ echo "$out"
     if (bootSetting === "rotate") return ""
     if (bootSetting.indexOf("snapshot:") === 0) return bootSetting
     if (bootSetting === "follow") {
-      var d = Designs.byId(designId)
+      var d = Designs.byId(designId, root.userDesigns)
       return d && d.boot === true ? d.id : ""
     }
     return bootSetting
@@ -1318,8 +2370,10 @@ echo "$out"
   function setBoot(value) {
     var v = String(value || "").trim().toLowerCase()
     if (v !== "follow" && v !== "stock" && v !== "theme" && v !== "rotate" && v.indexOf("video:") !== 0 && v.indexOf("custom:") !== 0 && v.indexOf("snapshot:") !== 0) {
-      var d = Designs.byId(v)
+      var d = Designs.byId(v, root.userDesigns)
       if (!d || d.boot !== true) return false
+    } else if (v.indexOf(":") > 0 && !bootItemValid(v)) {
+      return false
     }
     if (bootApplying) return false
     bootOverride = v
@@ -1345,7 +2399,7 @@ echo "$out"
     if (!force && target === bootApplied) return
     bootApplying = true
     bootApplyTarget = target
-    bootApplyProc.command = ["env", "BOOT_CLIP_SECONDS=" + bootClipSeconds, "bash", pluginDir + "/plymouth/apply.sh", target]
+    bootApplyProc.command = Bounded.run(["env", "BOOT_CLIP_SECONDS=" + bootClipSeconds, "BOOT_SHUTDOWN=" + bootShutdown, "bash", pluginDir + "/plymouth/apply.sh", target], { deadline: 1200, cap: 1048576 })
     bootApplyProc.running = true
   }
 
@@ -1371,10 +2425,18 @@ echo "$out"
   // apply.sh records what it installed and which Omarchy theme the colors
   // came from; picking it up here keeps the state right across shell restarts
   // and command line applies.
+  // Watched by a FileView that never reads; the read is a CappedFile.
   FileView {
     path: root.stateHome + "/omarchy/lock-explorer-boot"
+    preload: false
     watchChanges: true
     printErrors: false
+    onFileChanged: bootStateFile.reload()
+  }
+  Parts.CappedFile {
+    id: bootStateFile
+    path: root.stateHome + "/omarchy/lock-explorer-boot"
+    maxBytes: 4096
     onLoaded: {
       var parts = String(text()).trim().split(/\s+/)
       var value = parts[0] || ""
@@ -1385,7 +2447,6 @@ echo "$out"
       root.bootAppliedVersion += 1
     }
     onLoadFailed: { root.bootApplied = ""; root.bootAppliedTheme = "" }
-    onFileChanged: reload()
   }
 
   // The boot screen colors are baked in at apply time, so a theme switch
@@ -1425,6 +2486,7 @@ echo "$out"
   // fresh snapshot (which also carries the entry geometry).
   signal bootResnapshotRequested(string designId, bool persist)
   signal exploreTabRequested(string tab)
+  signal exploreViewRequested(string view)
 
   function maybeResyncBoot() {
     if (!bootResync || bootApplying || !bootResyncArmed) return
@@ -1483,7 +2545,7 @@ echo "$out"
     // rendered the state before this change and would leave stale previews.
     if (bootPreviewsRunning) { bootPreviewsPending = true; return }
     bootPreviewsRunning = true
-    bootPreviewsProc.command = ["bash", pluginDir + "/plymouth/previews.sh"]
+    bootPreviewsProc.command = Bounded.run(["bash", pluginDir + "/plymouth/previews.sh"], { deadline: 600, cap: 1048576 })
     bootPreviewsProc.running = true
   }
 
@@ -1510,7 +2572,7 @@ echo "$out"
 
   Process {
     id: bootListsProc
-    command: ["bash", "-c", "ls -1 \"$HOME/.config/omarchy/lock-videos\" 2>/dev/null; echo ::; for f in \"$HOME\"/.config/omarchy/boot-designs/*.conf; do [ -f \"$f\" ] && basename \"$f\" .conf; done"]
+    command: Bounded.run(["bash", "-c", "ls -1 \"$HOME/.config/omarchy/lock-videos\" 2>/dev/null; echo ::; for f in \"$HOME\"/.config/omarchy/boot-designs/*.conf; do [ -f \"$f\" ] && basename \"$f\" .conf; done"], { deadline: 15, cap: 1048576 })
     stdout: StdioCollector {
       id: bootListsOut
       waitForEnd: true
@@ -1553,10 +2615,83 @@ echo "$out"
     logEvent("boot-clip=" + v)
     var appliedIsClip = bootApplied.indexOf("video:") === 0
     if (!appliedIsClip) {
-      var d = Designs.byId(bootApplied)
+      var d = Designs.byId(bootApplied, root.userDesigns)
       appliedIsClip = !!(d && d.bootKind === "clip")
     }
     if (appliedIsClip) applyBoot(true, bootApplied)
+    return true
+  }
+
+  // Whether a design snapshot used as the boot screen keeps the design's clock.
+  // Plymouth cannot read the time, so a clock in the snapshot shows the moment
+  // it was grabbed (issue #74): "show" keeps the design as it is, "hide" leaves
+  // its time, date and day-bound parts out (DesignBase.hideTime). Saved on
+  // the plugin entry as bootClock; absent means "show".
+  property string bootClockOverride: ""
+  readonly property string configuredBootClock: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.bootClock === "hide")
+        return "hide"
+    }
+    return "show"
+  }
+  readonly property string bootClock: bootClockOverride.length > 0 ? bootClockOverride : configuredBootClock
+
+  function setBootClock(value) {
+    var v = String(value || "")
+    if (v !== "show" && v !== "hide") return false
+    bootClockOverride = v
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (v === "show") delete current.bootClock
+      else current.bootClock = v
+      writeEntry(current)
+    }
+    logEvent("boot-clock=" + v)
+    // Only a snapshot carries the design's clock; it is grabbed again.
+    if (bootApplied.indexOf("snapshot:") === 0)
+      bootResnapshotRequested(bootApplied.substring(9), bootSetting !== "follow")
+    return true
+  }
+
+  // What reboot and shutdown show while a design snapshot or a custom layout
+  // is the boot screen: "design" keeps the design's box-free capture up,
+  // "plain" leaves only the theme's background colour (issue #76). Saved on
+  // the plugin entry as bootShutdown; absent means "design".
+  property string bootShutdownOverride: ""
+  readonly property string configuredBootShutdown: {
+    var cfg = root.settingsConfig
+    var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
+    for (var i = 0; i < list.length; i++) {
+      var entry = list[i]
+      if (entry && String(entry.id || "") === pluginId && entry.bootShutdown === "plain")
+        return "plain"
+    }
+    return "design"
+  }
+  readonly property string bootShutdown: bootShutdownOverride.length > 0 ? bootShutdownOverride : configuredBootShutdown
+
+  function setBootShutdown(value) {
+    var v = String(value || "")
+    if (v !== "design" && v !== "plain") return false
+    bootShutdownOverride = v
+    if (shell && typeof shell.updateEntryInline === "function") {
+      var current = pluginEntry()
+      if (v === "design") delete current.bootShutdown
+      else current.bootShutdown = v
+      writeEntry(current)
+    }
+    logEvent("boot-shutdown=" + v)
+    // Baked into the generated theme, so an installed snapshot or layout is
+    // rebuilt with it. A snapshot goes back through the explorer, which
+    // carries the entry geometry the boot theme needs.
+    if (bootApplied.indexOf("snapshot:") === 0)
+      bootResnapshotRequested(bootApplied.substring(9), bootSetting !== "follow")
+    else if (bootApplied.indexOf("custom:") === 0)
+      applyBoot(true, bootApplied)
     return true
   }
 
@@ -1564,10 +2699,16 @@ echo "$out"
   signal bootDesignLoaded(string name, string content)
   property string bootDesignPendingLoad: ""
 
+  // Layouts are read as a plain file of at most 64 KiB, never through a link
+  // or anything that could block (a FIFO), and only by a checked name.
   function loadBootDesign(name) {
+    if (!layoutNameValid(name)) return false
     bootDesignPendingLoad = String(name)
-    bootLoadProc.command = ["cat", home + "/.config/omarchy/boot-designs/" + bootDesignPendingLoad + ".conf"]
+    bootLoadProc.command = Bounded.run(["bash", "-c",
+      'f="$1"; [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c %s -- "$f")" -le 65536 ] && head -c 65536 -- "$f"',
+      "--", home + "/.config/omarchy/boot-designs/" + bootDesignPendingLoad + ".conf"], { deadline: 15, cap: 1048576 })
     bootLoadProc.running = true
+    return true
   }
 
   Process {
@@ -1581,11 +2722,15 @@ echo "$out"
 
   property string bootSaveName: ""
   function saveBootDesign(name, content) {
+    if (!layoutNameValid(name)) return false
+    var text = String(content || "")
+    if (text.length > 65536) return false
     bootSaveName = String(name)
-    bootSaveProc.command = ["bash", "-c",
-      'mkdir -p "$HOME/.config/omarchy/boot-designs" && printf %s "$1" > "$HOME/.config/omarchy/boot-designs/$2.conf"',
-      "--", String(content), String(name)]
+    bootSaveProc.command = Bounded.run(["bash", "-c",
+      'source "$1" && d="$HOME/.config/omarchy/boot-designs" && safe_dir "$d" && printf %s "$2" | put_file "$d" "$3.conf"',
+      "--", safePathsLib, text, bootSaveName], { deadline: 15 })
     bootSaveProc.running = true
+    return true
   }
 
   Process {
@@ -1594,9 +2739,9 @@ echo "$out"
       // Generate the matching lock screen QML + its preview from the same
       // layout, so the pair stays in sync.
       var previews = root.stateHome + "/omarchy/lock-explorer-boot-previews"
-      lockGenProc.command = ["bash", "-c",
+      lockGenProc.command = Bounded.run(["bash", "-c",
         'mkdir -p "$3" && bash "$1" "$HOME/.config/omarchy/boot-designs/$2.conf" "$2" "$3/custom-$2-lock-$4.png"',
-        "--", root.pluginDir + "/plymouth/custom/genlock.sh", root.bootSaveName, previews, root.bootCurrentTheme]
+        "--", root.pluginDir + "/plymouth/custom/genlock.sh", root.bootSaveName, previews, root.bootCurrentTheme], { deadline: 600 })
       lockGenProc.running = true
     }
   }
@@ -1611,9 +2756,9 @@ echo "$out"
   }
 
   function createBootDesign() {
-    bootCreateProc.command = ["bash", "-c",
-      'dir="$HOME/.config/omarchy/boot-designs"; mkdir -p "$dir"; n="my-boot"; i=2; while [ -f "$dir/$n.conf" ]; do n="my-boot-$i"; i=$((i+1)); done; cp "$1" "$dir/$n.conf"; echo "$n"',
-      "--", pluginDir + "/plymouth/custom/template.conf"]
+    bootCreateProc.command = Bounded.run(["bash", "-c",
+      'source "$2" || exit 1; dir="$HOME/.config/omarchy/boot-designs"; safe_dir "$dir"; n="my-boot"; i=2; while [ -e "$dir/$n.conf" ] || [ -L "$dir/$n.conf" ]; do n="my-boot-$i"; i=$((i+1)); done; put_file "$dir" "$n.conf" < "$1" && echo "$n"',
+      "--", pluginDir + "/plymouth/custom/template.conf", safePathsLib], { deadline: 600, cap: 65536 })
     bootCreateProc.running = true
   }
 
@@ -1635,26 +2780,34 @@ echo "$out"
 
   // Boot screen rotation: a set of options that advances one step after
   // every boot. The screen is baked into the boot image, so the swap happens
-  // in the background right after login -- silently through the root path
-  // unit rotate-setup.sh installs (one pkexec, once), with a normal polkit
-  // prompt as the fallback. Saved on the plugin entry as bootRotation.
+  // right after login, through the same polkit prompt as any boot screen
+  // change. Saved on the plugin entry as bootRotation.
   property var bootRotationOverride: null
   readonly property var configuredBootRotation: {
     var cfg = root.settingsConfig
     var list = cfg && Array.isArray(cfg.plugins) ? cfg.plugins : []
     for (var i = 0; i < list.length; i++) {
       var entry = list[i]
-      if (entry && String(entry.id || "") === pluginId && Array.isArray(entry.bootRotation)) return entry.bootRotation
+      if (entry && String(entry.id || "") === pluginId && Array.isArray(entry.bootRotation))
+        return entry.bootRotation.filter(function(x) { return root.bootItemValid(x) })
     }
     return []
   }
   readonly property var bootRotation: bootRotationOverride !== null ? bootRotationOverride : configuredBootRotation
-  property bool bootRotateSilent: false
+  // Earlier versions could install a root path unit that applied the next
+  // theme without asking; a theme picks the plugin Plymouth loads as root,
+  // so that is passwordless root for anything running as the account. An
+  // update cannot take root files away by itself, so the first start that
+  // finds one asks to remove it (one polkit prompt, explained in a
+  // notification first) -- never while the screen is locked, where the
+  // dialog cannot show, and again at every start until it is gone.
+  property bool bootRotateHelperInstalled: false
+  property bool bootRotateRemovalAsked: false
   property string bootRotateNext: ""
 
   function toggleBootRotation(id) {
     var v = String(id || "")
-    if (v.length === 0 || v === "stock") return false
+    if (v.length === 0 || v === "stock" || !bootItemValid(v)) return false
     var list = bootRotation.slice()
     var idx = list.indexOf(v)
     if (idx === -1) list.push(v)
@@ -1674,7 +2827,9 @@ echo "$out"
   // saved boot setting alone (used by follow mode, which stays "follow").
   // entryRect ("cx,cy,w,h" in percent) is where the design's own input box
   // sits in the snapshot; the boot theme puts its bullets there.
-  function applyBootSnapshot(id, persist, entryRect) {
+  // extraRects ("WxH=cx,cy,w,h,align;...") are the same for the captures of
+  // the other monitor sizes (<id>@WxH.png, see the explorer's snapshot flow).
+  function applyBootSnapshot(id, persist, entryRect, extraRects) {
     if (bootApplying) return
     if (persist === undefined) persist = true
     if (persist) {
@@ -1687,46 +2842,61 @@ echo "$out"
     }
     bootApplying = true
     bootApplyTarget = "snapshot:" + id
-    bootApplyProc.command = ["env", "BOOT_CLIP_SECONDS=0",
+    bootApplyProc.command = Bounded.run(["env", "BOOT_CLIP_SECONDS=0", "BOOT_SHUTDOWN=" + bootShutdown,
       "SNAPSHOT_ENTRY=" + String(entryRect || ""),
-      "bash", pluginDir + "/plymouth/apply.sh", "snapshot:" + id]
+      "SNAPSHOT_ENTRY_EXTRA=" + String(extraRects || ""),
+      "bash", pluginDir + "/plymouth/apply.sh", "snapshot:" + id], { deadline: 1200, cap: 1048576 })
     bootApplyProc.running = true
     logEvent("boot-snapshot=" + id + (persist ? "" : " (follow)"))
   }
 
   function enableBootRotation() {
-    if (bootRotateSilent) { setBoot("rotate"); return }
-    // No home argument: the setup script reads it from the account that
-    // authenticated to pkexec. It lands in a root-owned helper, and $HOME is
-    // whatever the process that started the shell set it to.
-    bootRotateSetupProc.command = ["pkexec", "bash", pluginDir + "/plymouth/rotate-setup.sh", "install"]
-    bootRotateSetupProc.running = true
+    setBoot("rotate")
+  }
+
+  function askBootRotationHelperRemoval() {
+    if (!bootRotateHelperInstalled || bootRotateRemovalAsked || locked || lockRequested) return
+    bootRotateRemovalAsked = true
+    logEvent("boot-rotate-helper-removal: asking")
+    Quickshell.execDetached(["notify-send", "-a", "Lock Screen Explorer", "Removing an old boot screen helper",
+      "An earlier version installed a background service that could change the boot screen as root without asking. "
+      + "Enter your password to remove it."])
+    removeBootRotationHelper()
+  }
+
+  function removeBootRotationHelper() {
+    if (bootRotateRemoveProc.running) return false
+    bootRotateRemoveProc.command = Bounded.run(["pkexec", "bash", pluginDir + "/plymouth/rotate-setup.sh", "remove"], { deadline: 600, cap: 65536 })
+    bootRotateRemoveProc.running = true
+    return true
   }
 
   Process {
-    id: bootRotateSetupProc
+    id: bootRotateRemoveProc
     stdout: StdioCollector { }
     stderr: StdioCollector { }
     onExited: function(exitCode) {
-      if (exitCode === 0) {
-        root.bootRotateSilent = true
-        root.setBoot("rotate")
-        root.logEvent("boot-rotate-setup=ok")
-      } else {
-        root.logEvent("boot-rotate-setup-failed=" + exitCode)
-      }
+      root.logEvent(exitCode === 0 ? "boot-rotate-helper-removed" : "boot-rotate-helper-remove-failed=" + exitCode)
+      if (exitCode !== 0)
+        Quickshell.execDetached(["notify-send", "-a", "Lock Screen Explorer", "The old boot screen helper is still installed",
+          "It will be asked for again at the next start, or run: omarchy-shell lock removeBootRotationHelper"])
+      bootRotateCheckProc.running = true
     }
   }
 
   Process {
     id: bootRotateCheckProc
-    command: ["bash", "-c", "[ -f /etc/systemd/system/omarchy-lock-explorer-boot.path ] && echo yes || echo no"]
+    // Any piece of it: the path unit, its service or the helper script.
+    command: Bounded.run(["bash", "-c", "for f in /etc/systemd/system/omarchy-lock-explorer-boot.path /etc/systemd/system/omarchy-lock-explorer-boot.service /usr/local/lib/omarchy-lock-explorer-rotate.sh; do [ -e \"$f\" ] && { echo yes; exit; }; done; echo no"], { deadline: 10, cap: 65536 })
     stdout: StdioCollector {
       id: bootRotateCheckOut
       waitForEnd: true
       onStreamFinished: {
-        root.bootRotateSilent = String(bootRotateCheckOut.text || "").trim() === "yes"
-        root.maybeRotateBoot()
+        root.bootRotateHelperInstalled = String(bootRotateCheckOut.text || "").trim() === "yes"
+        if (root.bootRotateHelperInstalled) {
+          root.logEvent("boot-rotate-helper-present")
+          root.askBootRotationHelperRemoval()
+        }
       }
     }
   }
@@ -1746,7 +2916,7 @@ echo "$out"
 
   Process {
     id: bootRotateStampProc
-    command: ["bash", "-c", "bid=$(cat /proc/sys/kernel/random/boot_id); f=\"$HOME/.local/state/omarchy/lock-explorer-boot-rotated\"; [ \"$(cat \"$f\" 2>/dev/null)\" = \"$bid\" ] && echo skip || { echo \"$bid\" > \"$f\"; echo go; }"]
+    command: Bounded.run(["bash", "-c", "bid=$(cat /proc/sys/kernel/random/boot_id); f=\"$HOME/.local/state/omarchy/lock-explorer-boot-rotated\"; [ -f \"$f\" ] && [ ! -L \"$f\" ] && [ \"$(head -c 64 -- \"$f\")\" = \"$bid\" ] && echo skip || { [ ! -L \"$f\" ] || rm -f -- \"$f\"; echo \"$bid\" > \"$f\"; echo go; }"], { deadline: 10, cap: 65536 })
     stdout: StdioCollector {
       id: bootRotateStampOut
       waitForEnd: true
@@ -1754,14 +2924,7 @@ echo "$out"
         if (String(bootRotateStampOut.text || "").trim() !== "go") return
         if (root.bootRotateNext.length === 0 || root.bootApplying) return
         root.logEvent("boot-rotate -> " + root.bootRotateNext)
-        if (root.bootRotateSilent) {
-          root.bootApplying = true
-          root.bootApplyTarget = root.bootRotateNext
-          bootApplyProc.command = ["env", "BOOT_CLIP_SECONDS=" + root.bootClipSeconds, "bash", root.pluginDir + "/plymouth/apply.sh", root.bootRotateNext, "--spool"]
-          bootApplyProc.running = true
-        } else {
-          root.applyBoot(true, root.bootRotateNext)
-        }
+        root.applyBoot(true, root.bootRotateNext)
       }
     }
   }
@@ -1776,32 +2939,59 @@ echo "$out"
     onTriggered: {
       root.bootResyncArmed = true
       root.refreshBootLists()
-      // The silent-rotation check chains into maybeRotateBoot; the resync
-      // runs after so a rotation that just advanced satisfies it.
       bootRotateCheckProc.running = true
+      // The resync runs after the rotation so one that just advanced
+      // satisfies it.
+      root.maybeRotateBoot()
       root.maybeResyncBoot()
     }
   }
 
+  // The Omarchy theme that is on: the boot screen resyncs its palette to it,
+  // and the design follows it when asked to (followThemeDesign).
+  // Watched by a FileView that never reads; the read is a CappedFile.
   FileView {
     path: root.stateHome + "/omarchy/current/theme.name"
+    preload: false
     watchChanges: true
     printErrors: false
-    onLoaded: { root.bootCurrentTheme = String(text()).trim(); root.maybeResyncBoot() }
+    onFileChanged: themeNameFile.reload()
+  }
+  Parts.CappedFile {
+    id: themeNameFile
+    path: root.stateHome + "/omarchy/current/theme.name"
+    maxBytes: 256
+    onLoaded: {
+      // Joined into preview file names; anything off a plain name is ignored.
+      var t = String(text()).trim()
+      root.bootCurrentTheme = /^[A-Za-z0-9._-]{1,64}$/.test(t) && t.indexOf("..") === -1 ? t : ""
+      root.maybeResyncBoot()
+      root.followThemeDesign()
+    }
     onLoadFailed: root.bootCurrentTheme = ""
-    onFileChanged: reload()
   }
 
-  function setDesign(id) {
-    var d = Designs.byId(String(id || ""))
+  // `how` says what kind of pick this is. Nothing: a pick, filed under the
+  // theme that is on while the design follows the theme. "all": a pick for
+  // every theme, which forgets the per-theme picks so this design shows
+  // whatever theme comes up. "turn", or a day: a rotation turn (rotateDesign),
+  // which is not a pick, so the theme does not remember it; the day is saved.
+  function setDesign(id, how) {
+    var d = Designs.byId(String(id || ""), root.userDesigns)
     if (!d) return false
     designOverride = d.id
+    var everywhere = how === "all"
+    var map = followTheme && !how ? rememberThemeDesign(d.id) : null
+    if (everywhere) themeDesignsOverride = {}
     if (shell && typeof shell.updateEntryInline === "function") {
       var current = pluginEntry()
       current.design = d.id
+      if (map) current.themeDesigns = map
+      if (everywhere) delete current.themeDesigns
+      if (how && how !== "turn" && !everywhere) current.rotatedOn = how
       writeEntry(current)
     }
-    logEvent("design=" + d.id)
+    logEvent("design=" + d.id + (everywhere ? " all-themes" : ""))
     if (bootSetting === "follow") applyBoot(false)
     return true
   }
@@ -1816,6 +3006,18 @@ echo "$out"
   property bool authenticatingPassword: false
   property bool fingerprintAuthenticating: false
   property bool faceAuthenticating: false
+  // Face retries on its own after a miss, but not forever: a camera that
+  // errors out at once would otherwise spin the PAM stack four times a
+  // second for as long as the screen stays locked. Enter on an empty field
+  // or the face button starts a fresh round.
+  readonly property int faceRetryLimit: 5
+  property int faceMisses: 0
+  // Every fingerprint round is a PAM claim on the reader, and pam_fprintd resets
+  // the device on each claim (the kernel logs a USB port reset per round). On a
+  // dark panel nobody is there to touch it, so the rounds have to stop with the
+  // screen: same accounting as face.
+  readonly property int fingerprintRetryLimit: 5
+  property int fingerprintMisses: 0
   property bool passwordPamConfigured: false
   property bool fingerprintConfigured: false
   property bool faceConfigured: false
@@ -1835,6 +3037,55 @@ echo "$out"
   property bool fido2Authenticating: false
   property bool fido2NeedsPin: false
   property string fido2Status: ""
+  // What the fingerprint reader is saying, in pam_fprintd's own words: "Place
+  // your finger on the fingerprint reader", "Failed to match fingerprint".
+  // Empty while no scan is running. The fido2Status of the fingerprint path.
+  property string fingerprintStatus: ""
+  property bool fingerprintStatusIsError: false
+  property string fingerprintPendingStatus: ""
+
+  // A failed match is followed within a moment by the next attempt's prompt,
+  // which would wipe it before anyone could read it. It is held on screen for
+  // a beat, with the prompt that arrives meanwhile queued behind it. None of
+  // it wakes the display: the prompt repeats after every attempt, and
+  // pam_fprintd reports its own periodic timeout as an error too, so waking
+  // on either would keep a blanked screen lit for as long as it is locked.
+  // What a PAM module says is shown on the lock screen, so it is treated as
+  // foreign text: the first line only, capped, and every design renders it as
+  // PlainText. A module that sends markup, a novel or a screenful of newlines
+  // cannot reshape the lock screen with it.
+  readonly property int pamMessageMax: 120
+
+  function pamMessageText(raw) {
+    var text = String(raw || "").replace(/\s+/g, " ").trim()
+    return text.length > pamMessageMax ? text.substring(0, pamMessageMax - 1) + "…" : text
+  }
+
+  function handleFingerprintMessage() {
+    if (!lockRequested) return
+    var text = pamMessageText(fingerprintPam.message)
+    if (text.length === 0) return
+    if (fingerprintPam.messageIsError) {
+      fingerprintPendingStatus = ""
+      fingerprintStatus = text
+      fingerprintStatusIsError = true
+      fingerprintErrorHold.restart()
+      return
+    }
+    if (fingerprintErrorHold.running) {
+      fingerprintPendingStatus = text
+      return
+    }
+    fingerprintStatus = text
+    fingerprintStatusIsError = false
+  }
+
+  function clearFingerprintStatus() {
+    fingerprintErrorHold.stop()
+    fingerprintPendingStatus = ""
+    fingerprintStatus = ""
+    fingerprintStatusIsError = false
+  }
   // Last thing pam_u2f said that did not want an answer, i.e. the cue.
   property string fido2Cue: ""
   // PIN attempts in this lock. A wrong PIN costs one of the key's retries,
@@ -1845,6 +3096,21 @@ echo "$out"
   property int fido2PinAttempts: 0
   property bool fido2PinSubmitted: false
   readonly property int fido2PinAttemptLimit: 3
+  // pam_u2f waits about 30s for a touch and then returns PamResult.Failed --
+  // the same code a touch that did not verify gives. A round that ran the
+  // whole wait with no PIN typed is the no-touch case, and it spends nothing:
+  // no PIN retry, no on-key biometric retry. Anything shorter had a user in it.
+  readonly property int fido2NoTouchMs: 20000
+  property real fido2RoundStarted: 0
+  // A touch that did not verify costs one of the key's own UV retries, not a
+  // PIN retry, and the key caps those itself and resets them on a match. The
+  // round is offered again rather than the user having to Tab back, and this
+  // many in a row is the key at its own limit: hand over the password.
+  readonly property int fido2TouchRetryLimit: 3
+  property int fido2TouchMisses: 0
+  // A failed round with no PIN in it waits here while the probe says whether
+  // the key is still attached; see handleFido2Finished.
+  property bool fido2FailurePending: false
   readonly property bool fido2Exhausted: fido2PinAttempts >= fido2PinAttemptLimit
   readonly property bool fido2Active: authMode === "fido2"
   property bool previewVisible: false
@@ -1864,16 +3130,92 @@ echo "$out"
   // clipUnlocking is the hold, clipFailsafe the way out if the file misbehaves.
   property bool clipUnlocking: false
   property bool unlockPlayback: false
+  // Set only by finishUnlock, which only a successful password, fingerprint,
+  // face or security-key check reaches; releaseLock drops the session lock
+  // for nothing else. A design says when its unlock clip is done, and a user
+  // design is arbitrary QML: its word must never be enough on its own.
+  property bool unlockAuthorized: false
   property bool previewClipPlaying: false
   // Nothing should decode video into a screen that is switched off.
   property bool screenBlanked: false
+  // The layout being typed on, as a short code ("DK"), and whether that is
+  // something other than a plain US keyboard. A password is typed blind, so a
+  // layout switched since last time is invisible without this: the field shows
+  // the code when it is not US. Read from Hyprland, which is what the session
+  // is running under; anywhere else this stays empty and nothing is shown.
+  property string keyboardLayout: ""
+  // Caps lock, the other thing a password typed blind cannot show. The state
+  // is read from Hyprland, never inferred from a key: Omarchy maps Caps Lock
+  // to Compose by default (`compose:caps`), so the key that looks like it
+  // toggles caps usually does not, and a lock screen that says CAPS when it
+  // does not is worse than one that says nothing. Hyprland raises no event
+  // for it either, so the lock screen asks while someone is typing into it,
+  // at most this often.
+  property bool capsLock: false
+  readonly property int capsProbeInterval: 1500
+  property double lastCapsProbe: 0
+
+  function probeCapsLock() {
+    var now = Date.now()
+    if (now - lastCapsProbe < capsProbeInterval) return
+    lastCapsProbe = now
+    refreshKeyboardLayout()
+  }
+  readonly property bool foreignLayout: keyboardLayout.length > 0 && keyboardLayout !== "US"
+  // With more than one layout configured the badge in the field switches to
+  // the next one when clicked, the same as Hyprland's own layout toggle.
+  property int keyboardLayoutCount: 1
+  property string keyboardDevice: ""
+
+  Process {
+    id: switchLayoutProc
+    command: Bounded.run(["hyprctl", "switchxkblayout", root.keyboardDevice.length > 0 ? root.keyboardDevice : "all", "next"], { deadline: 10 })
+    onExited: root.refreshKeyboardLayout()
+  }
+
+  function switchKeyboardLayout() {
+    if (keyboardLayoutCount < 2 || switchLayoutProc.running) return false
+    switchLayoutProc.running = true
+    logEvent("layout-switch")
+    return true
+  }
+
+  function refreshKeyboardLayout() {
+    if (!keyboardLayoutProc.running) keyboardLayoutProc.running = true
+  }
+
+  // Keys pressed into a dark panel only wake it: the field stays inert until
+  // the wake has run and the panel has had wakeInputGrace to light up, so the
+  // keystrokes that switched the screen on never land in the password.
+  property bool inputBlocked: false
+  // Set by a blank, taken by the one wake that undoes it. Only that wake runs
+  // omarchy-system-wake and so starts the grace: a key or pointer move after
+  // it used to run the helpers again, and each run pushed the grace back, so
+  // the field stayed inert for as long as anyone kept typing (#86). A shell
+  // started over a panel left dark still owes it one.
+  property bool wakePending: true
+  // Set for the wake that a resume from suspend runs. Nothing typed lit the
+  // panel then, so that wake skips the grace (#85).
+  property bool resumeWake: false
+  // A wake that came while the blank was still running, held until it is done.
+  property bool wakeAfterBlank: false
 
   // With `misc:session_lock_xray` the compositor keeps drawing the desktop
   // under the lock surface, so the unlock fades straight into it and the
   // wallpaper the animation otherwise lands on would only be in the way.
   property bool sessionLockXray: false
 
-  readonly property bool locked: lockRequested || sessionLock.locked || sessionLock.secure
+  // Quickshell 0.3.2 omits lockStateChanged on normal unlock. Re-read
+  // the native properties after release rather than retaining a stale binding.
+  property int lockStateRevision: 0
+  readonly property bool locked: {
+    root.lockStateRevision
+    return lockRequested || sessionLock.locked || sessionLock.secure
+  }
+
+  function refreshLockState() {
+    lockStateRevision += 1
+  }
   readonly property bool authenticating: authenticatingPassword || fingerprintAuthenticating || faceAuthenticating || fido2Authenticating
 
   function realScreenCount() {
@@ -1900,7 +3242,11 @@ echo "$out"
   }
 
   function requestSessionLock() {
-    if (!lockRequested || sessionLock.locked || sessionLock.secure) return
+    // Only this copy's own request counts. `secure` can already be true with
+    // no surface of ours -- a copy of this service that held the lock was
+    // reloaded away, and Hyprland is showing its crashed-lock screen -- and
+    // waiting on it then leaves that screen up for good.
+    if (!lockRequested || sessionLock.locked) return
     if (sessionLockStabilizeTimer.running) return
 
     if (!hasRealScreen()) {
@@ -1930,6 +3276,59 @@ echo "$out"
     strandedLockCheckProc.running = true
   }
 
+  // Which copy of this service holds the lock. Omarchy hot-reloads a local
+  // plugin when its files change and can run the new copy next to the old one
+  // for a while; a lock the old copy holds is not an orphan, and locking again
+  // from the new one leaves a second lock that never comes up. The holder says
+  // so once a second in this file; a check that finds the session locked and
+  // the claim fresh and someone else's waits, and takes over only once the
+  // claim goes stale -- the holder gone with the session still locked.
+  // The account's full name, for the designs' greetings (DesignBase.displayName).
+  property string accountName: ""
+  Process {
+    id: accountNameProc
+    running: true
+    command: Bounded.run(["bash", "-c", "getent passwd -- \"$(id -un)\" | cut -d: -f5 | cut -d, -f1"], { deadline: 10, cap: 65536 })
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.accountName = String(text || "").trim().substring(0, 80)
+    }
+  }
+
+  readonly property string lockClaimPath: (Quickshell.env("XDG_RUNTIME_DIR") || (Quickshell.env("HOME") + "/.cache")) + "/omarchy-lock-explorer.lock-held"
+  readonly property string instanceToken: String(Date.now()) + "-" + String(Math.floor(Math.random() * 1e9))
+  readonly property bool holdsLock: {
+    root.lockStateRevision
+    return sessionLock.locked || sessionLock.secure
+  }
+
+  FileView {
+    id: lockClaim
+    path: root.lockClaimPath
+    // Written, never read here.
+    preload: false
+    atomicWrites: true
+    printErrors: false
+  }
+
+  Timer {
+    id: lockClaimHeartbeat
+    interval: 1000
+    repeat: true
+    triggeredOnStart: true
+    running: root.holdsLock
+    onTriggered: lockClaim.setText(root.instanceToken + "\n")
+  }
+
+  onHoldsLockChanged: if (!holdsLock) lockClaim.setText("")
+
+  // A claim that was fresh: ask again until it is released or goes stale.
+  Timer {
+    id: strandedDeferTimer
+    interval: 1500
+    onTriggered: root.checkStrandedLock()
+  }
+
   function recoverStrandedLock() {
     if (!strandedLock || locked || !passwordPamConfigured) return
 
@@ -1950,8 +3349,17 @@ echo "$out"
     if (!faceCheckProc.running) faceCheckProc.running = true
   }
 
+  // A probe already running is not an answer to a request made after it
+  // started, so the request is queued and the probe runs once more.
+  // Capped: a flapping hidraw device (a bad cable, a receiver reconnecting)
+  // could otherwise keep every answer discarded and a pending failure or the
+  // next round waiting on it for good.
+  property bool fido2ProbeQueued: false
+  property int fido2ProbeReruns: 0
+  readonly property int fido2ProbeRerunLimit: 2
   function refreshFido2Status() {
-    if (!fido2CheckProc.running) fido2CheckProc.running = true
+    if (fido2CheckProc.running) fido2ProbeQueued = true
+    else fido2CheckProc.running = true
   }
 
   function refreshSessionLockXray() {
@@ -1969,15 +3377,22 @@ echo "$out"
     pendingPassword = ""
     failureMessage = ""
     failedAttempts = 0
+    failureTimes = []
+    fido2FailurePending = false
     authenticatingPassword = false
     fingerprintAuthenticating = false
     fingerprintRetryTimer.stop()
+    fingerprintMisses = 0
+    clearFingerprintStatus()
+    faceMisses = 0
+    faceRetryTimer.stop()
     if (passwordPam.active) passwordPam.abort()
     if (fingerprintPam.active) fingerprintPam.abort()
     if (facePam.active) facePam.abort()
     abortFido2()
     fido2PinAttempts = 0
     fido2PinSubmitted = false
+    fido2TouchMisses = 0
     authMode = "password"
     authModeSettled = false
   }
@@ -1988,9 +3403,14 @@ echo "$out"
       return false
     }
 
+    rotateDesign()
     cancelUnlockAnimation()
     resetAuthenticationState()
+    inputBlocked = false
+    inputUnblockTimer.stop()
     lockRequested = true
+    lockedAt = Date.now()
+    lastFaceRound = 0
     armBlankTimer()
     logEvent("lock-requested")
     queueSessionLock()
@@ -2000,6 +3420,7 @@ echo "$out"
       root.refreshFingerprintStatus()
       root.refreshFaceStatus()
       root.refreshFido2Status()
+      root.refreshKeyboardLayout()
       root.refreshSessionLockXray()
       root.rescanUserDesigns()
       // The frame is ready before the unlock needs it.
@@ -2013,7 +3434,10 @@ echo "$out"
   function finishUnlock() {
     if (!root.locked && !lockRequested) return
     if (unlocking || clipUnlocking) return
+    unlockAuthorized = true
 
+    var away = awayReport ? awayFailures(Date.now()) : []
+    pendingAwayReport = away.length > 0 ? away : null
     lockRequested = false
     pendingSessionLock = false
     sessionLockStabilizeTimer.stop()
@@ -2030,7 +3454,8 @@ echo "$out"
     // design says when it is done; the failsafe does not care what it thinks.
     // Without qt6-multimedia a clip design has already fallen back to
     // Classic, so unlock instantly instead of waiting on the clip failsafe.
-    if (designHasClip && multimediaAvailable && (sessionLock.locked || sessionLock.secure)) {
+    // Reduce motion means no moving unlock either: no clip, no animation.
+    if (designHasClip && multimediaAvailable && !motionReduced && (sessionLock.locked || sessionLock.secure)) {
       clipUnlocking = true
       unlockPlayback = true
       clipFailsafe.restart()
@@ -2040,7 +3465,7 @@ echo "$out"
       return
     }
 
-    if (unlockAnimated && (sessionLock.locked || sessionLock.secure)) {
+    if (unlockAnimated && !motionReduced && (sessionLock.locked || sessionLock.secure)) {
       unlocking = true
       logEvent("unlocking=" + unlockAnimation)
       unlockTimer.restart()
@@ -2051,6 +3476,11 @@ echo "$out"
   }
 
   function releaseLock() {
+    if (!unlockAuthorized) {
+      logEvent("unlock-refused (no authentication)")
+      return
+    }
+    unlockAuthorized = false
     unlockTimer.stop()
     clipFailsafe.stop()
     var hadClip = clipUnlocking
@@ -2058,14 +3488,21 @@ echo "$out"
     unlockPlayback = false
     unlocking = false
     sessionLock.locked = false
+    refreshLockState()
     logEvent("unlocked")
-    // The clip was the whole show, no second video on top of it.
+    if (pendingAwayReport) sendAwayReport(pendingAwayReport)
+    pendingAwayReport = null
+    // The clip was the whole show, no second video on top of it; and none at
+    // all while motion is reduced.
     if (hadClip) commitClipWallpaper()
-    else playSting()
+    else if (!motionReduced) playSting()
+    // Asked for while the screen was locked: now the dialog can show.
+    Qt.callLater(askBootRotationHelperRemoval)
   }
 
   function cancelUnlockAnimation() {
     if (!unlocking && !clipUnlocking) return
+    unlockAuthorized = false
     unlockTimer.stop()
     clipFailsafe.stop()
     unlocking = false
@@ -2094,9 +3531,60 @@ echo "$out"
       }
       return
     }
+    var wasBlanked = screenBlanked
     screenBlanked = false
-    if (!wakeProcess.running) wakeProcess.running = true
+    // A panel coming back is the moment to look: the lid just opened, or
+    // somebody touched the machine. Locking with the screen already on is
+    // not, unless the setting says otherwise.
+    if (lockRequested && sessionLock.secure && faceStart !== "off") {
+      var now = Date.now()
+      if (wasBlanked
+          || (faceStart === "wake" && now - lockedAt > faceWakeQuiet && now - lastFaceRound > faceRoundGap))
+        Qt.callLater(retryFace)
+    }
+    if (wasBlanked && lockRequested && sessionLock.secure) Qt.callLater(retryFido2)
+    // The panel coming back is the first moment a finger can be on the reader
+    // again, and the misses from before the blank no longer describe this round.
+    // A reader that paused on misses comes back the same way: any key, click or
+    // pointer move lands here, and under Never no blank ever follows.
+    if ((wasBlanked || fingerprintMisses >= fingerprintRetryLimit)
+        && lockRequested && sessionLock.secure && fingerprintConfigured) {
+      fingerprintMisses = 0
+      Qt.callLater(startFingerprint)
+    }
+    // Failsafe: a wake that never exits must not leave the field inert.
+    if (inputBlocked && !inputUnblockTimer.running) {
+      inputUnblockTimer.interval = 3000
+      inputUnblockTimer.restart()
+    }
+    if (wakePending && !wakeProcess.running) {
+      wakePending = false
+      // A key while the blank is still on its way would light the displays
+      // before the blank switches them off, leaving the lock awake on dark
+      // screens (#87). The wake follows the blank instead.
+      if (blankProcess.running) {
+        wakeAfterBlank = true
+        logEvent("wake: after the blank")
+      } else {
+        wakeProcess.running = true
+      }
+    }
     if (lockRequested) armBlankTimer()
+  }
+
+  // A lock that comes back from suspend comes back lit and ready to type,
+  // whether its own blank or hypridle left the panel dark before the sleep.
+  // A key that already woke it has started the grace; that ends here too.
+  function wakeFromResume() {
+    if (!lockRequested) return
+    logEvent("resume")
+    if (inputBlocked && !screenBlanked) {
+      inputUnblockTimer.stop()
+      inputBlocked = false
+    }
+    resumeWake = inputBlocked
+    if (!wakeProcess.running) wakePending = true
+    runWake()
   }
 
   function runBlank() {
@@ -2106,6 +3594,19 @@ echo "$out"
     }
     if (keepDisplayOn) return
     screenBlanked = !displayBlankingSuppressed
+    inputBlocked = screenBlanked
+    inputUnblockTimer.stop()
+    wakePending = true
+    wakeAfterBlank = false
+    // Nothing to authenticate to while the panel is dark: drop the scan and
+    // let go of the camera until it comes back.
+    if (screenBlanked) stopFace()
+    // A reader kept listening in the dark starts over there, even one that
+    // paused on misses while the panel was lit.
+    if (screenBlanked && fingerprintInDark && lockRequested && fingerprintConfigured) {
+      fingerprintMisses = 0
+      Qt.callLater(startFingerprint)
+    }
     if (!blankProcess.running) blankProcess.running = true
   }
 
@@ -2115,7 +3616,7 @@ echo "$out"
     // is a password: leave key mode first so it never meets fido2Pam.
     if (password.length > 0 && fido2Active) setAuthMode("password")
     if (!lockRequested || authenticatingPassword || password.length === 0) {
-      if (password.length === 0 && faceConfigured) root.startFace()
+      if (password.length === 0 && faceConfigured) root.retryFace()
       return
     }
 
@@ -2144,12 +3645,17 @@ echo "$out"
     enteredPassword = ""
     pendingPassword = ""
     failedAttempts += 1
-    failureMessage = "Authentication failed (" + failedAttempts + ")"
+    failureTimes = failureTimes.concat([Date.now()])
+    failureMessage = t("Authentication failed (%1)").arg(failedAttempts)
     runWake()
   }
 
   function startFingerprint() {
     if (!lockRequested || !sessionLock.secure || !fingerprintConfigured) return
+    // Unless the reader is to keep listening in the dark, a round behind a
+    // dark panel only claims the reader and resets it. Blanking stops the
+    // rounds; the wake starts a fresh one.
+    if (screenBlanked && !fingerprintInDark) return
     if (fingerprintPam.active || fingerprintAuthenticating) return
 
     fingerprintAuthenticating = true
@@ -2162,30 +3668,79 @@ echo "$out"
     fingerprintAuthenticating = false
 
     if (!lockRequested) return
+    // A match is a match even if the panel went dark mid-round. A miss from
+    // that round says nothing about who is in front of the screen now.
     if (result === PamResult.Success) {
       finishUnlock()
-    } else if (fingerprintConfigured) {
+    } else if (!screenBlanked) {
+      fingerprintMissed()
+    } else if (fingerprintInDark && fingerprintConfigured) {
+      // Nobody can be counted as missing in the dark: keep listening.
       fingerprintRetryTimer.restart()
     }
   }
 
+  function fingerprintMissed() {
+    if (!lockRequested || !fingerprintConfigured || screenBlanked) return
+    fingerprintMisses += 1
+    if (fingerprintMisses < fingerprintRetryLimit) fingerprintRetryTimer.restart()
+    else logEvent("fingerprint-paused after " + fingerprintMisses + " misses")
+  }
+
+  // The camera runs only behind a lock screen someone can actually see: a
+  // dark panel means nobody is in front of it, and a scan there is a camera
+  // on for no one. Blanking stops the round; the wake starts a fresh one.
   function startFace() {
     if (!lockRequested || !sessionLock.secure || !faceConfigured) return
+    // "off" stops the automatic rounds, not the face button or Enter on an
+    // empty field, which come through retryFace.
+    if (screenBlanked) return
     if (facePam.active || faceAuthenticating) return
 
     faceAuthenticating = true
+    lastFaceRound = Date.now()
     if (!facePam.start()) faceAuthenticating = false
+  }
+
+  // Wake and retry ask the probe rather than trusting the last answer: a key
+  // that left while the session slept is otherwise still "present", and the
+  // first round after wake is charged for it. The probe starts the round.
+  function retryFido2() {
+    fido2TouchMisses = 0
+    refreshFido2Status()
+  }
+
+  function retryFace() {
+    faceMisses = 0
+    startFace()
+  }
+
+  function stopFace() {
+    faceRetryTimer.stop()
+    faceMisses = 0
+    if (facePam.active) facePam.abort()
+    faceAuthenticating = false
   }
 
   function handleFaceFinished(result) {
     faceAuthenticating = false
 
     if (!lockRequested) return
+    // A result from a round the blanking cut short says nothing about who is
+    // in front of the screen now.
+    if (screenBlanked) return
     if (result === PamResult.Success) {
       finishUnlock()
-    } else if (faceConfigured) {
-      faceRetryTimer.restart()
+    } else {
+      faceMissed()
     }
+  }
+
+  function faceMissed() {
+    if (!lockRequested || !faceConfigured || screenBlanked) return
+    faceMisses += 1
+    if (faceMisses < faceRetryLimit) faceRetryTimer.restart()
+    else logEvent("face-paused after " + faceMisses + " misses")
   }
 
   // Key mode when a key is enrolled and plugged in at lock time, password
@@ -2211,10 +3766,9 @@ echo "$out"
       pendingPassword = ""
       logEvent("auth-mode=" + mode)
     }
-    // Settled last: the hotplug watcher runs on (!settled || fido2Active),
-    // and settling before the switch would stop and respawn it on every Tab.
     // A request for a mode that cannot be entered still settles, so a later
-    // probe does not override what the user asked for.
+    // probe does not override what the user asked for. A key plugged in
+    // afterwards is still offered to an empty field; see fido2CheckProc.
     authModeSettled = true
   }
 
@@ -2224,39 +3778,43 @@ echo "$out"
   function requestFido2() {
     if (!lockRequested || !fido2Configured) return
     if (fido2Exhausted) {
-      failureMessage = "Use your password"
+      failureMessage = t("Use your password")
       return
     }
     if (!fido2Active) setAuthMode("fido2")
     if (!fido2Active || fido2Authenticating) return
     failureMessage = ""
-    fido2Status = "Looking for your key…"
+    fido2Status = t("Looking for your key…")
     refreshFido2Status()
   }
 
+  // Same reasoning as startFace: a dark panel means nobody is in front of it,
+  // and a key blinking there is asking for a finger that is not coming.
+  // Blanking ends the round; the wake starts a fresh one.
   function startFido2() {
     // Same gate as startFingerprint: a success before the surface is secure
     // would unlock a lock that never took.
     if (!lockRequested || !sessionLock.secure) return
     if (!fido2Active || !fido2Configured || fido2Exhausted) return
     if (fido2Pam.active || fido2Authenticating) return
+    if (screenBlanked) return
     if (!fido2TokenPresent) {
-      fido2Status = "No security key found"
+      fido2Status = t("No security key found")
       return
     }
 
-    runWake()
     // Anything typed before the key was found would be read-only in the field
     // from here on and end up in front of the PIN, costing a retry for nothing.
     enteredPassword = ""
     fido2NeedsPin = false
     fido2PinSubmitted = false
     fido2Cue = ""
-    fido2Status = "Waiting for your key…"
+    fido2Status = t("Waiting for your key…")
     fido2Authenticating = true
+    fido2RoundStarted = Date.now()
     if (!fido2Pam.start()) {
       fido2Authenticating = false
-      fido2Status = "Could not start the key"
+      fido2Status = t("Could not start the key")
     }
   }
 
@@ -2276,16 +3834,19 @@ echo "$out"
   // touch, so the cue it did send is kept and put back at that point.
   function handleFido2Message() {
     if (!fido2Authenticating) return
-    runWake()
+    // Only the PIN prompt is asking the user for something. Waking on the
+    // touch cue instead re-arms the blank timer once per round, so a lock with
+    // a key plugged in would never go dark.
+    if (fido2Pam.responseRequired) runWake()
 
     if (fido2Pam.responseRequired) {
       fido2NeedsPin = true
-      fido2Status = "Enter the PIN for your key"
+      fido2Status = t("Enter the PIN for your key")
       return
     }
 
     fido2NeedsPin = false
-    var text = String(fido2Pam.message || "").trim()
+    var text = pamMessageText(fido2Pam.message)
     if (text.length > 0) {
       fido2Cue = text
       fido2Status = text
@@ -2313,15 +3874,75 @@ echo "$out"
     fido2NeedsPin = false
     enteredPassword = ""
 
+    var elapsed = fido2RoundStarted ? Date.now() - fido2RoundStarted : 0
+    fido2RoundStarted = 0
+
     if (!lockRequested) return
+    // A touch is unambiguous even in the dark, so a success still unlocks.
     if (result === PamResult.Success) {
       finishUnlock()
       return
     }
 
-    // No retry timer, unlike fingerprint and face: a failed key attempt can
-    // have cost one of its PIN retries, so the next one is the user's call.
+    // A result from a round the blanking cut short says nothing about who is
+    // in front of the screen now, and waking the panel to report it would
+    // light the lock up for no one.
+    if (screenBlanked) {
+      fido2Status = ""
+      logEvent("fido2-round dropped, screen dark")
+      return
+    }
+
+    // Nobody touched the key: the module waited its whole time and gave up.
+    // Nothing was spent and nobody tried, so it is not held against the user
+    // and the round simply starts again -- otherwise a lock left alone for
+    // longer than that wait looks like it is still on the key while nothing
+    // is listening, and Tab is the only way back.
+    if (!fido2PinSubmitted && elapsed >= fido2NoTouchMs) {
+      fido2Status = ""
+      logEvent("fido2-round again after " + elapsed + "ms")
+      fido2RetryTimer.restart()
+      return
+    }
+
+    // A key pulled out mid-round fails it at once, and so does every retry
+    // after it: counted as misses, three of those arrive within a second and
+    // a half, park the lock on the password, stop the hotplug watcher, and
+    // report three failed attempts when nobody tried anything. A round with
+    // no PIN in it asks the probe first; see fido2FailureChecked.
+    // PAM can see the USB loss before udev removes the node, so a probe sent
+    // at once can still find the key and charge a miss for an unplug. Give
+    // it the same settle the hotplug path uses before asking.
+    if (!fido2PinSubmitted) {
+      fido2FailurePending = true
+      fido2FailureSettle.restart()
+      return
+    }
+    countFido2Failure()
+  }
+
+  // The probe answered for a round that failed without a PIN. Gone: say so,
+  // stay on the key, and let the hotplug watcher (which runs while the key is
+  // absent in key mode) start the next round when it is back. Still there:
+  // it was a real miss.
+  function fido2FailureChecked() {
+    fido2FailurePending = false
+    if (!lockRequested) return
+    if (!fido2TokenPresent) {
+      fido2Status = t("No security key found")
+      failureMessage = ""
+      logEvent("fido2-round ended, key removed")
+      runWake()
+      return
+    }
+    countFido2Failure()
+  }
+
+  function countFido2Failure() {
+    // A PIN that went to the key is still the user's to spend again.
+    var pinWasSubmitted = fido2PinSubmitted
     failedAttempts += 1
+    failureTimes = failureTimes.concat([Date.now()])
     if (fido2PinSubmitted) fido2PinAttempts += 1
     fido2PinSubmitted = false
     fido2Status = ""
@@ -2331,10 +3952,21 @@ echo "$out"
       // its retries are not the lock screen's to spend. Back to the password;
       // setAuthMode clears failureMessage, so the message goes after it.
       setAuthMode("password")
-      failureMessage = "Use your password"
+      failureMessage = t("Use your password")
       logEvent("fido2-exhausted")
     } else {
-      failureMessage = "Security key failed (" + failedAttempts + ")"
+      failureMessage = t("Security key failed (%1)").arg(failedAttempts)
+      if (!pinWasSubmitted && fido2Active && fido2TokenPresent) {
+        fido2TouchMisses += 1
+        if (fido2TouchMisses < fido2TouchRetryLimit) fido2RetryTimer.restart()
+        else {
+          setAuthMode("password")
+          // Short: the field elides, and the switch to the password is what
+          // says where to go next.
+          failureMessage = t("Too many tries")
+          logEvent("fido2-paused after " + fido2TouchMisses + " misses")
+        }
+      }
     }
     runWake()
   }
@@ -2345,17 +3977,21 @@ echo "$out"
     locked: false
 
     onSecureStateChanged: {
+      // The native manager finishes changing its state after this signal.
+      Qt.callLater(root.refreshLockState)
       root.logEvent("secure=" + secure)
       if (secure) {
         root.pendingSessionLock = false
         sessionLockStabilizeTimer.stop()
         pendingSessionLockTimer.stop()
         root.startFingerprint()
+        if (root.faceStart === "always") root.startFace()
         root.startFido2()
       }
     }
 
     onLockStateChanged: {
+      root.refreshLockState()
       root.logEvent("session-locked=" + locked)
 
       if (locked) {
@@ -2377,7 +4013,7 @@ echo "$out"
 
     WlSessionLockSurface {
       id: lockSurface
-      color: Color.background
+      color: Commons.Color.background
 
       UnlockLayer {
         anchors.fill: parent
@@ -2392,37 +4028,64 @@ echo "$out"
           fadeIn: true
           designId: root.showsInput(lockSurface.screen) ? root.designId : "companion"
           revision: root.designsRevision
+          userDesigns: root.userDesigns
           backgroundPath: root.backgroundPath
           backgroundVersion: root.backgroundVersion
           avatarPath: root.avatarPath
           avatarVersion: root.avatarVersion
           fingerprintConfigured: root.fingerprintConfigured
+          keyboardLayout: root.keyboardLayout
+          keyboardLayoutCount: root.keyboardLayoutCount
+          batteryLow: root.batteryLow
+          batteryPercent: root.batteryPercent
+          ownerMessage: root.ownerMessage
+          onLayoutSwitchRequested: root.switchKeyboardLayout()
+          capsLock: root.capsLock
+          onCapsProbeRequested: root.probeCapsLock()
+          powerActions: root.powerActions
+          mediaControls: root.mediaControls && root.showsInput(lockSurface.screen)
+          onPowerActionRequested: function(action) { root.runPowerAction(action) }
           faceConfigured: root.faceConfigured
           fido2Configured: root.fido2Configured
           fido2Active: root.fido2Active
           fido2Authenticating: root.fido2Authenticating
           fido2NeedsPin: root.fido2NeedsPin
           fido2Status: root.fido2Status
+          fingerprintStatus: root.fingerprintStatus
+          fingerprintStatusIsError: root.fingerprintStatusIsError
           authenticatingPassword: root.authenticatingPassword
           failureMessage: root.failureMessage
           failedAttempts: root.failedAttempts
           inputEnabled: root.lockRequested
+          inputBlocked: root.inputBlocked
           loadBackground: root.locked
           passwordText: root.enteredPassword
           videoPath: root.videoPath
           videoPlaying: root.locked && DisplayPower.dimOverlayOpacity(root.displayPowerSettings,
             root.powerPhase, lockSurface.screen ? lockSurface.screen.name : "", root.lockRequested) < 1
+          screenName: lockSurface.screen ? lockSurface.screen.name : ""
+          wallpaperSpanGroups: root.wallpaperSpanGroups
+          screenAwake: !root.screenBlanked
           unlockPlayback: root.unlockPlayback && root.showsInput(lockSurface.screen)
           clipSpeed: root.clipSpeed
           twelveHour: root.twelveHour
-          screenName: lockSurface.screen ? lockSurface.screen.name : ""
-          wallpaperSpanGroups: root.wallpaperSpanGroups
-          onUnlockFinished: root.releaseLock()
+          wallpaperBlur: root.wallpaperBlurValue
+          wallpaperDim: root.wallpaperDimShift
+          uiScale: root.uiScale
+          holdStill: root.motionReduced
+          language: root.language
+          fullName: root.accountName
+          showLayoutBadge: root.showLayoutBadge
+          showCapsBadge: root.showCapsBadge
+          allowPasswordToggle: root.allowPasswordToggle
+          showAuthIcons: root.showAuthIcons
+          // Only ends a clip unlock that authentication started.
+          onUnlockFinished: if (root.clipUnlocking) root.releaseLock()
           onPasswordTextEdited: function(password) { root.enteredPassword = password }
           onSubmitPassword: function(password) { root.submitPassword(password) }
           onClearFailureRequested: root.failureMessage = ""
           onWakeRequested: root.runWake()
-          onFaceRequested: root.startFace()
+          onFaceRequested: root.retryFace()
           onFido2Requested: root.requestFido2()
           onPasswordRequested: root.setAuthMode("password")
           onSubmitFido2Pin: function(pin) { root.submitFido2Pin(pin) }
@@ -2463,6 +4126,7 @@ echo "$out"
         anchors.fill: parent
         designId: root.previewDesignId.length > 0 ? root.previewDesignId : root.designId
         revision: root.designsRevision
+        userDesigns: root.userDesigns
         backgroundPath: root.backgroundPath
         backgroundVersion: root.backgroundVersion
         avatarPath: root.avatarPath
@@ -2481,11 +4145,24 @@ echo "$out"
         unlockPlayback: root.previewClipPlaying
         clipSpeed: root.clipSpeed
         twelveHour: root.twelveHour
+        wallpaperBlur: root.wallpaperBlurValue
+        wallpaperDim: root.wallpaperDimShift
+        uiScale: root.uiScale
+        holdStill: root.motionReduced
+        language: root.language
+        fullName: root.accountName
+        showLayoutBadge: root.showLayoutBadge
+        showCapsBadge: root.showCapsBadge
+        allowPasswordToggle: root.allowPasswordToggle
+        showAuthIcons: root.showAuthIcons
+        batteryLow: root.batteryLow
+        batteryPercent: root.batteryPercent
+        ownerMessage: root.ownerMessage
         // Hold the clip's last frame in the preview instead of snapping back
         // to the start; Esc (hidePreview) resets it.
         onUnlockFinished: {}
         onPasswordTextEdited: function(password) { root.previewTyped = password }
-        onFaceRequested: root.startFace()
+        onFaceRequested: root.retryFace()
       }
     }
 
@@ -2543,13 +4220,15 @@ echo "$out"
     config: "omarchy-lock-fingerprint"
     user: root.userName
 
+    onPamMessage: root.handleFingerprintMessage()
+
     onCompleted: function(result) {
       root.handleFingerprintFinished(result)
     }
 
+    // completed(PamResult.Error) follows every error and counts the miss.
     onError: function(error) {
       root.fingerprintAuthenticating = false
-      if (root.lockRequested && root.fingerprintConfigured) fingerprintRetryTimer.restart()
     }
   }
 
@@ -2564,7 +4243,7 @@ echo "$out"
 
     onError: function(error) {
       root.faceAuthenticating = false
-      if (root.lockRequested && root.faceConfigured) faceRetryTimer.restart()
+      root.faceMissed()
     }
   }
 
@@ -2608,32 +4287,67 @@ echo "$out"
   }
 
   Timer {
+    id: fingerprintErrorHold
+    interval: 2500
+    onTriggered: {
+      if (root.fingerprintPendingStatus.length > 0) {
+        root.fingerprintStatus = root.fingerprintPendingStatus
+        root.fingerprintStatusIsError = false
+        root.fingerprintPendingStatus = ""
+      } else if (root.fingerprintStatusIsError) {
+        root.fingerprintStatus = ""
+        root.fingerprintStatusIsError = false
+      }
+    }
+  }
+
+  // Longer than faceRetryTimer: a round that ends the instant it starts would
+  // otherwise spin, and nothing here is racing a camera frame.
+  Timer {
+    id: fido2RetryTimer
+    interval: 500
+    repeat: false
+    onTriggered: root.refreshFido2Status()
+  }
+
+  // See handleFido2Finished: the probe for a failed round without a PIN.
+  Timer {
+    id: fido2FailureSettle
+    interval: 400
+    repeat: false
+    onTriggered: root.refreshFido2Status()
+  }
+
+  Timer {
     id: faceRetryTimer
     interval: 250
     repeat: false
     onTriggered: root.startFace()
   }
 
-  // A key plugged in after the lock came up has to be noticed, and polling for
-  // it would mean spawning a probe every couple of seconds for as long as the
-  // screen is locked. This sleeps on the udev netlink socket instead and wakes
-  // only when a hidraw device actually appears. It exists in one state only:
-  // locked, a key enrolled, none attached, nothing in flight, and the user is
-  // not already on the password. A key arriving mid-password changes nothing
-  // (settleAuthMode leaves half-typed input alone), so the process would be
-  // kept alive for an answer nobody acts on.
+  // A key plugged in or pulled out while locked has to be noticed, and polling
+  // for it would mean spawning a probe every couple of seconds for as long as
+  // the screen is locked. This sleeps on the udev netlink socket instead and
+  // wakes only when a hidraw device comes or goes. It runs for the whole lock,
+  // a round in flight included: watching only while no key was attached left
+  // a key pulled mid-round or during sleep cached as present. The probe it
+  // asks for never interrupts a running round or half-typed input; see
+  // startFido2 and fido2CheckProc. With wakeOnKeyInsert on, an add while the
+  // screen is dark goes through keyInsertSettle instead, which wakes the
+  // display only when the probe finds the key.
   Process {
     id: fido2HotplugWatch
-    running: root.lockRequested && root.fido2Configured && !root.fido2TokenPresent
-      && !root.fido2Exhausted
-      && !root.fido2Authenticating && !root.authenticatingPassword
-      && root.enteredPassword.length === 0
-      && (!root.authModeSettled || root.fido2Active)
-    command: ["udevadm", "monitor", "--udev", "--subsystem-match=hidraw"]
+    running: root.lockRequested && root.fido2Configured
+      && (!root.fido2Exhausted || root.wakeOnKeyInsert)
+    command: Bounded.run(["udevadm", "monitor", "--udev", "--subsystem-match=hidraw"], { deadline: 0, line: 4096 })
     stdout: SplitParser {
       // "UDEV  [123.4] add  /devices/.../hidraw/hidraw0 (hidraw)"
       onRead: function(line) {
-        if (String(line).indexOf(" add ") >= 0) fido2HotplugSettle.restart()
+        var text = String(line)
+        var added = text.indexOf(" add ") >= 0
+        if (!added && text.indexOf(" remove ") < 0) return
+        if (added && root.wakeOnKeyInsert && root.screenBlanked) keyInsertSettle.restart()
+        else fido2HotplugSettle.restart()
       }
     }
   }
@@ -2648,12 +4362,65 @@ echo "$out"
     onTriggered: root.refreshFido2Status()
   }
 
+  // Lock-on-removal, while unlocked. Wake-on-insert rides on
+  // fido2HotplugWatch, which already runs for the whole lock, so the two never
+  // run side by side. Any hidraw device comes and goes here -- a mouse
+  // receiver, a game pad -- so a removal is only acted on once the probe says
+  // the key itself is gone.
+  property bool keyEventProbe: false
+  property bool keyInsertProbe: false
+  Process {
+    id: keyEventWatch
+    running: root.fido2Configured && root.lockOnKeyRemoval && !root.lockRequested
+    command: Bounded.run(["udevadm", "monitor", "--udev", "--subsystem-match=hidraw"], { deadline: 0, line: 4096 })
+    // Lock-on-removal compares against the last answer, so that answer has
+    // to be current from the moment the watch starts -- after an unlock the
+    // key may have come or gone while the lock was up.
+    onRunningChanged: if (running && !root.lockRequested) root.refreshFido2Status()
+    stdout: SplitParser {
+      onRead: function(line) {
+        var text = String(line)
+        var added = text.indexOf(" add ") >= 0
+        var removed = text.indexOf(" remove ") >= 0
+        // Unlocked, both directions keep the presence current: a key plugged
+        // in after a password unlock has to be known before it can be missed.
+        if ((added || removed) && !root.lockRequested) keyEventSettle.restart()
+      }
+    }
+  }
+
+  // Same settle as fido2HotplugSettle: collapses the burst of events one plug
+  // produces, and gives the node time to get its permissions.
+  Timer {
+    id: keyEventSettle
+    interval: 400
+    repeat: false
+    onTriggered: {
+      root.keyEventProbe = true
+      root.refreshFido2Status()
+    }
+  }
+
+  // Any HID device can be what went in, so the probe decides: the display
+  // wakes only when the key is there (see fido2CheckProc), and the same
+  // answer starts the round.
+  Timer {
+    id: keyInsertSettle
+    interval: 400
+    repeat: false
+    onTriggered: {
+      if (!root.lockRequested || !root.screenBlanked) return
+      root.keyInsertProbe = true
+      root.refreshFido2Status()
+    }
+  }
+
   Process {
     id: userDesignsProc
     // Files built on ClipDesign are tagged (with their clip file when it is
     // named inline) so they keep their animation flag and their video across
     // rescans.
-    command: ["bash", "-c", "for f in \"$0\"/*.qml; do [ -e \"$f\" ] || continue; c=$(grep -o 'clipName: \"[^\"]*\"' \"$f\" 2>/dev/null | head -1 | cut -d'\"' -f2); if [ -n \"$c\" ]; then printf '%s\\tclip\\t%s\\n' \"$f\" \"$c\"; elif grep -q ClipDesign \"$f\" 2>/dev/null; then printf '%s\\tclip\\n' \"$f\"; elif grep -q '// designer:1:' \"$f\" 2>/dev/null; then printf '%s\\tdesigner\\n' \"$f\"; else printf '%s\\n' \"$f\"; fi; done", root.userDesignsDir]
+    command: Bounded.run(["bash", "-c", "for f in \"$0\"/*.qml; do [ -f \"$f\" ] || continue; c=$(grep -o 'clipName: \"[^\"]*\"' \"$f\" 2>/dev/null | head -1 | cut -d'\"' -f2); if [ -n \"$c\" ]; then printf '%s\\tclip\\t%s\\n' \"$f\" \"$c\"; elif grep -q ClipDesign \"$f\" 2>/dev/null; then printf '%s\\tclip\\n' \"$f\"; elif grep -q '// designer:1:' \"$f\" 2>/dev/null; then printf '%s\\tdesigner\\n' \"$f\"; else printf '%s\\n' \"$f\"; fi; done", root.userDesignsDir], { deadline: 30, cap: 1048576 })
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -2670,16 +4437,17 @@ echo "$out"
           if (parts.length > 2 && parts[2].trim().length > 0) d.clipFile = parts[2].trim()
           return d
         })
-        var before = JSON.stringify(Designs.USER)
-        Designs.setUser(list)
-        if (JSON.stringify(list) !== before) root.designsRevision += 1
+        if (JSON.stringify(list) !== JSON.stringify(root.userDesigns)) {
+          root.userDesigns = list
+          root.designsRevision += 1
+        }
       }
     }
   }
 
   Process {
     id: readlinkProc
-    command: ["readlink", "-f", root.currentBackgroundLink]
+    command: Bounded.run(["readlink", "-f", root.currentBackgroundLink], { deadline: 10, cap: 65536 })
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
@@ -2702,9 +4470,77 @@ echo "$out"
     onTriggered: root.refreshBackground()
   }
 
+  // A theme switch changes the colors at once and points the link at the new
+  // theme's wallpaper with them: look straight away, and once more in case the
+  // link moved just after, instead of showing the old wallpaper under the new
+  // colors until the next poll -- or missing a theme picked within it.
+  readonly property color themeColorProbe: Commons.Color.background
+  onThemeColorProbeChanged: themeBackgroundTimer.restart()
+  Timer {
+    id: themeBackgroundTimer
+    interval: 150
+    onTriggered: { root.refreshBackground(); themeBackgroundLateTimer.restart() }
+  }
+  Timer {
+    id: themeBackgroundLateTimer
+    interval: 900
+    onTriggered: root.refreshBackground()
+  }
+
+  // The active layout of the keyboard being typed on. `layout` is the list
+  // from the config ("us,dk") and `active_layout_index` picks from it, which
+  // gives a short code without a table to look it up in.
+  Process {
+    id: keyboardLayoutProc
+    command: Bounded.run(["hyprctl", "-j", "devices"], { deadline: 10, cap: 1048576 })
+    stdout: StdioCollector { id: keyboardLayoutStdout; waitForEnd: true }
+    onExited: function(exitCode) {
+      if (exitCode !== 0) { root.keyboardLayout = ""; return }
+      var listed = []
+      try {
+        listed = JSON.parse(String(keyboardLayoutStdout.text || "{}")).keyboards || []
+      } catch (e) {
+        root.keyboardLayout = ""
+        return
+      }
+      var kb = null
+      for (var i = 0; i < listed.length; i++) {
+        if (!listed[i] || !listed[i].active_keymap) continue
+        if (listed[i].main === true) { kb = listed[i]; break }
+        if (!kb) kb = listed[i]
+      }
+      if (!kb) { root.keyboardLayout = ""; return }
+      var codes = String(kb.layout === undefined ? "" : kb.layout).split(",")
+      var at = Number(kb.active_layout_index || 0)
+      var code = codes.length > at ? codes[at] : codes[0]
+      // Hyprland reports the configured layout verbatim, and a custom XKB
+      // layout is a free-form name. The badge bounds what it draws; this
+      // bounds what is kept.
+      root.keyboardLayout = String(code || "").trim().toUpperCase().substring(0, 24)
+      root.keyboardLayoutCount = codes.filter(function(c) { return String(c).trim().length > 0 }).length
+      root.keyboardDevice = String(kb.name || "")
+      // Older Hyprland does not report it; then it stays off rather than lying.
+      root.capsLock = kb.capsLock === true
+    }
+  }
+
+  // Hyprland announces a layout switch on its event socket, so the code stays
+  // right when the layout is toggled with the screen already locked.
+  Socket {
+    id: hyprEvents
+    path: (Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000") + "/hypr/"
+      + (Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "") + "/.socket2.sock"
+    connected: root.locked && (Quickshell.env("HYPRLAND_INSTANCE_SIGNATURE") || "").length > 0
+    parser: SplitParser {
+      onRead: function(line) {
+        if (String(line).indexOf("activelayout") === 0) root.refreshKeyboardLayout()
+      }
+    }
+  }
+
   Process {
     id: fingerprintCheckProc
-    command: ["bash", "-c", "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v fprintd-list >/dev/null 2>&1 && fprintd-list \"$USER\" 2>/dev/null | grep -qi finger; then echo yes; else echo no; fi"]
+    command: Bounded.run(["bash", "-c", "if [[ -f /etc/pam.d/omarchy-lock-fingerprint ]] && command -v fprintd-list >/dev/null 2>&1 && fprintd-list \"$USER\" 2>/dev/null | grep -qi finger; then echo yes; else echo no; fi"], { deadline: 20, cap: 65536 })
     stdout: StdioCollector { id: fingerprintCheckStdout; waitForEnd: true }
     onExited: {
       root.fingerprintConfigured = String(fingerprintCheckStdout.text || "").trim() === "yes"
@@ -2715,30 +4551,90 @@ echo "$out"
 
   Process {
     id: faceCheckProc
-    command: [root.checkFaceAuthPath, "--yes"]
+    command: Bounded.run([root.checkFaceAuthPath, "--yes"], { deadline: 20, cap: 65536 })
     stdout: StdioCollector { id: faceCheckStdout; waitForEnd: true }
     onExited: {
       root.faceConfigured = String(faceCheckStdout.text || "").trim() === "yes"
-      if (root.lockRequested && root.faceConfigured) root.startFace()
+      if (root.lockRequested && root.faceConfigured && root.faceStart === "always") root.startFace()
       else if (!root.faceConfigured && facePam.active) facePam.abort()
     }
   }
 
   Process {
     id: fido2CheckProc
-    command: [root.checkFido2AuthPath]
+    command: Bounded.run([root.checkFido2AuthPath], { deadline: 20, cap: 65536 })
     stdout: StdioCollector { id: fido2CheckStdout; waitForEnd: true }
     onExited: {
+      // A request that arrived while this probe ran may be about a change
+      // this probe started too early to see -- a key pulled after it had
+      // already listed the devices. Its answer is not acted on; the next one is.
+      if (root.fido2ProbeQueued && root.fido2ProbeReruns < root.fido2ProbeRerunLimit) {
+        root.fido2ProbeQueued = false
+        root.fido2ProbeReruns += 1
+        Qt.callLater(function() { fido2CheckProc.running = true })
+        return
+      }
+      root.fido2ProbeQueued = false
+      root.fido2ProbeReruns = 0
+
       var answer = String(fido2CheckStdout.text || "").trim().split(/\s+/)
+      var wasPresent = root.fido2TokenPresent
       root.fido2Installed = answer[0] === "yes"
       root.fido2TokenPresent = answer[1] === "present"
+      var keyEvent = root.keyEventProbe
+      var keyInsert = root.keyInsertProbe
+      root.keyEventProbe = false
+      root.keyInsertProbe = false
 
+      // Not configured any more wins over a pending failure: the round is
+      // moot, and the lock goes back to the password rather than waiting on
+      // a key it will not use.
       if (!root.fido2Configured) {
+        root.fido2FailurePending = false
         if (root.fido2Active) root.setAuthMode("password")
         return
       }
 
+      // Only a probe a hidraw event asked for can lock: a settings refresh
+      // that happens to find no key is not somebody walking away with it.
+      if (keyEvent && !root.lockRequested && root.lockOnKeyRemoval
+          && wasPresent && !root.fido2TokenPresent) {
+        if (root.passwordPamConfigured && !root.lockRequested) {
+          root.logEvent("lock-on-key-removal")
+          root.beginLock()
+        }
+        return
+      }
+
+      // The device that went in while the screen was dark was the key: it was
+      // not there before and is now. With the key left in, a mouse or headset
+      // reconnecting would otherwise light the lock for nobody. The watcher
+      // sees removals while dark too, so a key that left is known as gone.
+      // runWake clears screenBlanked, so the round below can start.
+      if (keyInsert && root.lockRequested && root.screenBlanked
+          && !wasPresent && root.fido2TokenPresent) {
+        root.logEvent("wake-on-key-insert")
+        root.runWake()
+      }
+
+      if (root.fido2FailurePending) {
+        // A probe that finished inside the failure's settle window (one the
+        // hotplug watcher asked for, say) may predate the node going away.
+        // The one fido2FailureSettle sends decides.
+        if (fido2FailureSettle.running) return
+        root.fido2FailureChecked()
+        return
+      }
+
       if (!root.lockRequested) return
+      // A key plugged back in is offered again, even after the user went to
+      // the password, but only to an empty field: typed input, a check in
+      // flight and a key at its PIN limit are left alone.
+      if (!wasPresent && root.fido2TokenPresent && !root.fido2Active && !root.fido2Exhausted
+          && !root.authenticatingPassword && root.enteredPassword.length === 0) {
+        root.fido2TouchMisses = 0
+        root.setAuthMode("fido2")
+      }
       if (!root.fido2Active) root.settleAuthMode()
       if (root.fido2Active) root.startFido2()
     }
@@ -2746,7 +4642,7 @@ echo "$out"
 
   Process {
     id: sessionLockXrayProc
-    command: ["hyprctl", "getoption", "misc:session_lock_xray", "-j"]
+    command: Bounded.run(["hyprctl", "getoption", "misc:session_lock_xray", "-j"], { deadline: 10, cap: 65536 })
     stdout: StdioCollector {
       id: sessionLockXrayOut
       waitForEnd: true
@@ -2762,10 +4658,24 @@ echo "$out"
 
   Process {
     id: strandedLockCheckProc
-    command: ["bash", "-c", "omarchy-hyprland-session-locked"]
+    // 0 locked and nobody holds it, 1 not locked, 2 no answer yet,
+    // 3 locked and another copy of this service still holds it.
+    command: Bounded.run(["bash", "-c",
+      "omarchy-hyprland-session-locked || exit $?; " +
+      "[[ -s $1 ]] || exit 0; " +
+      "[[ $(head -n1 -- \"$1\") == \"$2\" ]] && exit 0; " +
+      "age=$(( $(date +%s) - $(stat -c %Y -- \"$1\") )); " +
+      "(( age <= 2 )) && exit 3; exit 0",
+      "bash", root.lockClaimPath, root.instanceToken], { deadline: 10 })
     onExited: function(exitCode) {
       // No output to read the lock off yet.
       if (exitCode === 2) return
+
+      if (exitCode === 3) {
+        if (root.lastEvent !== "lock-held-elsewhere: waiting") root.logEvent("lock-held-elsewhere: waiting")
+        strandedDeferTimer.restart()
+        return
+      }
 
       root.strandedLockResolved = true
 
@@ -2777,17 +4687,52 @@ echo "$out"
 
   Process {
     id: wakeProcess
-    command: ["bash", "-c", "rm -f \"$1/display-off\"; omarchy-brightness-display on; omarchy-system-wake", "bash", root.blankMarkerDir]
+    command: Bounded.run(["bash", "-c", "rm -f \"$1/display-off\"; omarchy-brightness-display on; omarchy-system-wake", "bash", root.blankMarkerDir], { deadline: 30 })
+    onExited: {
+      var grace = root.resumeWake ? 0 : root.wakeInputGrace
+      root.resumeWake = false
+      if (!root.inputBlocked || root.screenBlanked) return
+      inputUnblockTimer.interval = grace
+      inputUnblockTimer.restart()
+    }
+  }
+
+  // Suspend stops the monotonic clock the timers run on but not the wall
+  // clock, so the first tick after a resume finds the wall clock far ahead.
+  // A clock step looks the same, and at worst lights the lock.
+  Timer {
+    id: resumeWatch
+    interval: 1000
+    repeat: true
+    running: root.lockRequested
+    property double lastTick: 0
+    onRunningChanged: lastTick = running ? Date.now() : 0
+    onTriggered: {
+      var now = Date.now()
+      if (lastTick > 0 && now - lastTick > interval + 3000) root.wakeFromResume()
+      lastTick = now
+    }
+  }
+
+  Timer {
+    id: inputUnblockTimer
+    repeat: false
+    onTriggered: if (!root.screenBlanked) root.inputBlocked = false
   }
 
   Process {
     id: blankProcess
     // The marker goes down before the display does: the shell can be gone
     // within two seconds of the output dropping.
-    command: ["bash", "-c", root.displayBlankingSuppressed
+    command: Bounded.run(["bash", "-c", root.displayBlankingSuppressed
       ? "omarchy-brightness-keyboard off"
       : "mkdir -p \"$1\" && : > \"$1/display-off\"; omarchy-brightness-keyboard off; omarchy-brightness-display off",
-      "bash", root.blankMarkerDir]
+      "bash", root.blankMarkerDir], { deadline: 30 })
+    onExited: {
+      if (!root.wakeAfterBlank) return
+      root.wakeAfterBlank = false
+      if (!wakeProcess.running) wakeProcess.running = true
+    }
   }
 
   // Runs once at startup. A display-off marker still there means the last
@@ -2795,9 +4740,9 @@ echo "$out"
   // relaunch in this login sees it too (the runtime dir goes with the login).
   Process {
     id: blankCrashCheckProc
-    command: ["bash", "-c",
+    command: Bounded.run(["bash", "-c",
       "[[ -e $1/display-off ]] && mv -f \"$1/display-off\" \"$1/blank-crashed\"; [[ -e $1/blank-crashed ]]",
-      "bash", root.blankMarkerDir]
+      "bash", root.blankMarkerDir], { deadline: 10 })
     onExited: function(exitCode) {
       if (exitCode !== 0) return
       root.blankCrashed = true
@@ -2908,7 +4853,9 @@ echo "$out"
     id: explorerApiComponent
     QtObject {
       readonly property string designId: root.designId
+      readonly property string safePathsLib: root.safePathsLib
       readonly property int designsRevision: root.designsRevision
+      readonly property var userDesigns: root.userDesigns
       readonly property string backgroundPath: root.backgroundPath
       readonly property int backgroundVersion: root.backgroundVersion
       readonly property string avatarPath: root.avatarPath
@@ -2927,12 +4874,49 @@ echo "$out"
       readonly property int defaultUnlockDuration: root.defaultUnlockDuration
       readonly property int blankDelay: root.blankDelay
       readonly property int defaultBlankDelay: root.defaultBlankDelay
+      readonly property int wakeGrace: root.wakeInputGrace
+      readonly property int defaultWakeGrace: root.defaultWakeGrace
+      readonly property bool powerActions: root.powerActions
+      readonly property bool mediaControls: root.mediaControls
+      readonly property bool followTheme: root.followTheme
+      readonly property var themeDesigns: root.themeDesigns
+      readonly property string rotateDesigns: root.rotateDesigns
+      readonly property string ownerMessage: root.ownerMessage
+      readonly property int ownerMessageMaxLength: root.ownerMessageMaxLength
+      readonly property bool awayReport: root.awayReport
+      readonly property string openAs: root.openAs
+      readonly property bool barIconShown: root.barIconShown
+      readonly property bool tourSeen: root.tourSeen
+      readonly property bool lockOnKeyRemoval: root.lockOnKeyRemoval
+      readonly property bool wakeOnKeyInsert: root.wakeOnKeyInsert
+      readonly property bool fingerprintInDark: root.fingerprintInDark
+      readonly property var favorites: root.favorites
+      readonly property bool showLayoutBadge: root.showLayoutBadge
+      readonly property string accountName: root.accountName
+      readonly property bool showCapsBadge: root.showCapsBadge
+      readonly property bool allowPasswordToggle: root.allowPasswordToggle
+      readonly property bool showAuthIcons: root.showAuthIcons
+      readonly property var shadowingDirs: root.shadowingDirs
+      readonly property var rivalLockPlugins: root.rivalLockPlugins
+      readonly property string doctorPath: root.doctorPath
+      readonly property string wallpaperBlur: root.wallpaperBlur
+      readonly property string wallpaperDim: root.wallpaperDim
+      readonly property real wallpaperBlurValue: root.wallpaperBlurValue
+      readonly property real wallpaperDimShift: root.wallpaperDimShift
+      readonly property string reduceMotion: root.reduceMotion
+      readonly property bool motionReduced: root.motionReduced
+      readonly property real uiScale: root.uiScale
+      readonly property var languages: root.languages
+      readonly property string language: root.language
+      readonly property string languageSetting: root.languageSetting
+      readonly property string systemLanguage: root.systemLanguage
       readonly property bool keepDisplayOn: root.keepDisplayOn
       readonly property bool displayPowerEnabled: !!root.phasedPower
       readonly property var displayPowerSettings: root.displayPowerSettings
       readonly property bool displayBlankingSuppressed: root.displayBlankingSuppressed
       readonly property bool fingerprintConfigured: root.fingerprintConfigured
       readonly property bool faceConfigured: root.faceConfigured
+      readonly property string faceStart: root.faceStart
       readonly property bool fido2Configured: root.fido2Configured
       readonly property bool fido2Installed: root.fido2Installed
       readonly property bool fido2Enabled: root.fido2Enabled
@@ -2955,6 +4939,8 @@ echo "$out"
       readonly property var bootVideos: root.bootVideos
       readonly property var bootCustomDesigns: root.bootCustomDesigns
       readonly property int bootClipSeconds: root.bootClipSeconds
+      readonly property string bootShutdown: root.bootShutdown
+      readonly property string bootClock: root.bootClock
       readonly property var bootRotation: root.bootRotation
 
       signal designCustomized(string id, string path)
@@ -2963,10 +4949,11 @@ echo "$out"
       signal clipDesignAdded(string id)
       signal bootResnapshotRequested(string designId, bool persist)
       signal exploreTabRequested(string tab)
+      signal exploreViewRequested(string view)
       signal bootDesignLoaded(string name, string content)
 
-      function setDesign(id) { return root.setDesign(id) }
-      function customizeDesign(id) { return root.customizeDesign(id) }
+      function setDesign(id, how) { return root.setDesign(id, how) }
+      function customizeDesign(id, fresh) { return root.customizeDesign(id, fresh) }
       function createDesignerDesign(content) { return root.createDesignerDesign(content) }
       function deleteDesign(id) { return root.deleteDesign(id) }
       function rescanUserDesigns() { return root.rescanUserDesigns() }
@@ -2996,6 +4983,32 @@ echo "$out"
       function setUnlockDuration(ms) { return root.setUnlockDuration(ms) }
       function setBlankDelay(ms) { return root.setBlankDelay(ms) }
       function setDisplayPowerSetting(field, value) { return root.setDisplayPowerSetting(field, value) }
+      function setWakeGrace(ms) { return root.setWakeGrace(ms) }
+      function setFaceStart(value) { return root.setFaceStart(value) }
+      function setPowerActions(value) { return root.setPowerActions(value) }
+      function setMediaControls(value) { return root.setMediaControls(value) }
+      function setFollowTheme(value) { return root.setFollowTheme(value) }
+      function setRotateDesigns(value) { return root.setRotateDesigns(value) }
+      function setOwnerMessage(value) { return root.setOwnerMessage(value) }
+      function setAwayReport(value) { return root.setAwayReport(value) }
+      function setOpenAs(value) { return root.setOpenAs(value) }
+      function setBarIcon(value) { return root.setBarIcon(value) }
+      function setTourSeen(value) { return root.setTourSeen(value) }
+      function setLockOnKeyRemoval(value) { return root.setLockOnKeyRemoval(value) }
+      function setWakeOnKeyInsert(value) { return root.setWakeOnKeyInsert(value) }
+      function setFingerprintInDark(value) { return root.setFingerprintInDark(value) }
+      function toggleFavorite(id) { return root.toggleFavorite(id) }
+      function setFieldItem(name, show) { return root.setFieldItem(name, show) }
+      function installPackages(names) { return root.installPackages(names) }
+      function runDoctor() { return root.runDoctor() }
+      function moveCopies() { return root.moveCopies() }
+      readonly property bool movingCopies: root.movingCopies
+      function setWallpaperBlur(value) { return root.setWallpaperBlur(value) }
+      function setWallpaperDim(value) { return root.setWallpaperDim(value) }
+      function setReduceMotion(value) { return root.setReduceMotion(value) }
+      function setUiScale(value) { return root.setUiScale(value) }
+      function setLanguage(value) { return root.setLanguage(value) }
+      function runPowerAction(action) { return root.runPowerAction(action) }
       function setKeepDisplayOn(on) { return root.setKeepDisplayOn(on) }
       function refreshBackground() { return root.refreshBackground() }
       function refreshFingerprintStatus() { return root.refreshFingerprintStatus() }
@@ -3007,16 +5020,19 @@ echo "$out"
       function logEvent(event) { return root.logEvent(event) }
       function setBoot(value) { return root.setBoot(value) }
       function applyBoot(force, explicitTarget) { return root.applyBoot(force, explicitTarget) }
-      function applyBootSnapshot(id, persist, entryRect) { return root.applyBootSnapshot(id, persist, entryRect) }
+      function applyBootSnapshot(id, persist, entryRect, extraRects) { return root.applyBootSnapshot(id, persist, entryRect, extraRects) }
       function setBootResync(on) { return root.setBootResync(on) }
       function refreshBootPreviews() { return root.refreshBootPreviews() }
       function setBootClipSeconds(n) { return root.setBootClipSeconds(n) }
+      function setBootShutdown(v) { return root.setBootShutdown(v) }
+      function setBootClock(v) { return root.setBootClock(v) }
       function loadBootDesign(name) { return root.loadBootDesign(name) }
       function saveBootDesign(name, content) { return root.saveBootDesign(name, content) }
       function createBootDesign() { return root.createBootDesign() }
       function deleteBootItem(id) { return root.deleteBootItem(id) }
       function toggleBootRotation(id) { return root.toggleBootRotation(id) }
       function enableBootRotation() { return root.enableBootRotation() }
+      function removeBootRotationHelper() { return root.removeBootRotationHelper() }
     }
   }
 
@@ -3030,6 +5046,7 @@ echo "$out"
     root.clipDesignAdded.connect(api.clipDesignAdded)
     root.bootResnapshotRequested.connect(api.bootResnapshotRequested)
     root.exploreTabRequested.connect(api.exploreTabRequested)
+    root.exploreViewRequested.connect(api.exploreViewRequested)
     root.bootDesignLoaded.connect(api.bootDesignLoaded)
     explorerApi = api
     Bridge.publish(api)
@@ -3048,21 +5065,79 @@ echo "$out"
     refreshMenuEntry()
     refreshBackground()
     refreshFingerprintStatus()
+    refreshFaceStatus()
+    refreshFido2Status()
     refreshSessionLockXray()
     rescanUserDesigns()
     detectAvatar()
     blankCrashCheckProc.running = true
+    duplicatePluginProc.running = true
+    rivalLockCheckTimer.start()
     checkStrandedLock()
+    settingsRestoreTimer.start()
   }
 
   Component.onDestruction: retireExplorerApi()
+
+  // Opened from the app launcher, the shell's app library shows a
+  // "Launching …" OSD 2s after the launch unless a new toplevel window appears
+  // by then. The explorer is layer-shell, so none does, and the OSD would
+  // otherwise stay up until the launcher's 15s timeout. The explorer's own
+  // close on open runs before the OSD exists, so watch for it for a few
+  // seconds after `explore` and close it 2s after it shows, long enough to
+  // read.
+  function watchLaunchOsd() {
+    launchOsdWatch.ticks = 0
+    launchOsdWatch.restart()
+  }
+
+  Timer {
+    id: launchOsdWatch
+    property int ticks: 0
+    interval: 150
+    repeat: true
+    onTriggered: {
+      // About 3.5s: the app library's 2s delay plus a slow summon.
+      if (++ticks > 24) { stop(); return }
+      if (!launchOsdStateProc.running) launchOsdStateProc.running = true
+    }
+  }
+
+  Process {
+    id: launchOsdStateProc
+    command: Bounded.run(["omarchy-shell", "osd", "state"], { deadline: 10, cap: 65536 })
+    stdout: StdioCollector { id: launchOsdStateOut; waitForEnd: true }
+    onExited: function(code) {
+      if (String(launchOsdStateOut.text || "").trim() !== "open") return
+      launchOsdWatch.stop()
+      launchOsdClose.restart()
+    }
+  }
+
+  Timer {
+    id: launchOsdClose
+    interval: 2000
+    onTriggered: Quickshell.execDetached(["omarchy-shell", "osd", "close"])
+  }
+
+  function summonExplorer(view) {
+    root.rescanUserDesigns()
+    root.watchLaunchOsd()
+    root.exploreViewRequested(view)
+    if (root.shell && typeof root.shell.summon === "function")
+      return root.shell.summon(root.pluginId, "{}") ? "ok" : "failed"
+    return "no-shell"
+  }
 
   IpcHandler {
     target: "lock"
 
     function lock(): string {
       if (!root.passwordPamConfigured) return "missing-pam"
-      if (!root.locked && !root.beginLock()) return "failed"
+      // lockRequested, not locked: during the unlock animation the session is
+      // still locked but on its way out, and a lock asked for then (before
+      // sleep, say) has to cancel that instead of being answered "ok".
+      if (!root.lockRequested && !root.beginLock()) return "failed"
       return "ok"
     }
 
@@ -3102,6 +5177,29 @@ echo "$out"
         unlockMs: root.unlockDuration,
         unlockAnimated: root.unlockAnimated,
         blankMs: root.blankDelay,
+        inputBlocked: root.inputBlocked,
+        keyboardLayout: root.keyboardLayout,
+        capsLock: root.capsLock,
+        fingerprintStatus: root.fingerprintStatus,
+        shadowedBy: root.shadowingDirs,
+        rivalLockPlugins: root.rivalLockPlugins,
+        wakeGraceMs: root.wakeInputGrace,
+        faceStart: root.faceStart,
+        powerActions: root.powerActions,
+        mediaControls: root.mediaControls,
+        awayReport: root.awayReport,
+        fingerprintInDark: root.fingerprintInDark,
+        wallpaperBlur: root.wallpaperBlur,
+        wallpaperDim: root.wallpaperDim,
+        reduceMotion: root.reduceMotion,
+        motionReduced: root.motionReduced,
+        onBattery: root.onBattery,
+        batteryPercent: root.batteryPercent,
+        batteryLow: root.batteryLow,
+        uiScale: root.uiScale,
+        language: root.language,
+        fieldItems: { layout: root.showLayoutBadge, caps: root.showCapsBadge, reveal: root.allowPasswordToggle, icons: root.showAuthIcons },
+        languageSetting: root.languageSetting,
         keepDisplayOn: root.keepDisplayOn,
         displayBlankingSuppressed: root.displayBlankingSuppressed,
         displayPowerSettings: root.phasedPower ? root.displayPowerSettings : null,
@@ -3140,13 +5238,18 @@ echo "$out"
     }
 
     function designs(): string {
-      return JSON.stringify(Designs.all().map(function(d) {
+      return JSON.stringify(Designs.all(root.userDesigns).map(function(d) {
         return { id: d.id, name: d.name, description: d.description, active: d.id === root.designId }
       }))
     }
 
     function setDesign(id: string): string {
       return root.setDesign(id) ? "ok" : "unknown-design"
+    }
+
+    // The same, for every theme at once: the per-theme picks are forgotten.
+    function setDesignForAll(id: string): string {
+      return root.setDesign(id, "all") ? "ok" : "unknown-design"
     }
 
     function setKeepDisplayOn(value: string): string {
@@ -3159,6 +5262,178 @@ echo "$out"
 
     function setDisplayPowerSetting(field: string, value: string): string {
       return root.setDisplayPowerSetting(field, value) ? "ok" : "invalid-value"
+    }
+
+    function powerActions(): string {
+      return root.powerActions ? "on" : "off"
+    }
+
+    function setPowerActions(value: string): string {
+      return root.setPowerActions(value) ? "ok" : "invalid-value"
+    }
+
+    function mediaControls(): string {
+      return root.mediaControls ? "on" : "off"
+    }
+
+    function setMediaControls(value: string): string {
+      return root.setMediaControls(value) ? "ok" : "invalid-value"
+    }
+
+    function followTheme(): string {
+      return root.followTheme ? "on" : "off"
+    }
+
+    // on or off: remember a design per Omarchy theme and switch with the theme.
+    function setFollowTheme(value: string): string {
+      return root.setFollowTheme(value) ? "ok" : "invalid-value"
+    }
+
+    function rotateDesigns(): string {
+      return root.rotateDesigns
+    }
+
+    // off, lock or day: the favorites take turns on each lock, or daily.
+    function setRotateDesigns(value: string): string {
+      return root.setRotateDesigns(value) ? "ok" : "invalid-value"
+    }
+
+    function ownerMessage(): string {
+      return root.ownerMessage
+    }
+
+    // A line in the bottom left corner of every design; empty clears it.
+    function setOwnerMessage(value: string): string {
+      return root.setOwnerMessage(value) ? "ok" : "too-long"
+    }
+
+    function awayReport(): string {
+      return root.awayReport ? "on" : "off"
+    }
+
+    function setAwayReport(value: string): string {
+      return root.setAwayReport(value) ? "ok" : "invalid-value"
+    }
+
+    function openAs(): string {
+      return root.openAs
+    }
+
+    // panel or full: what `explore` opens.
+    function setOpenAs(value: string): string {
+      return root.setOpenAs(value) ? "ok" : "invalid-value"
+    }
+
+    // The side panel with its first-open tour, again.
+    function tour(): string {
+      root.setTourSeen(false)
+      return root.summonExplorer("panel")
+    }
+
+    function barIcon(): string {
+      return root.barIconShown ? "on" : "off"
+    }
+
+    function setBarIcon(value: string): string {
+      return root.setBarIcon(value) ? "ok" : "invalid-value"
+    }
+
+    function lockOnKeyRemoval(): string {
+      return root.lockOnKeyRemoval ? "on" : "off"
+    }
+
+    function setLockOnKeyRemoval(value: string): string {
+      return root.setLockOnKeyRemoval(value) ? "ok" : "invalid-value"
+    }
+
+    function wakeOnKeyInsert(): string {
+      return root.wakeOnKeyInsert ? "on" : "off"
+    }
+
+    function setWakeOnKeyInsert(value: string): string {
+      return root.setWakeOnKeyInsert(value) ? "ok" : "invalid-value"
+    }
+
+    function fingerprintInDark(): string {
+      return root.fingerprintInDark ? "on" : "off"
+    }
+
+    function setFingerprintInDark(value: string): string {
+      return root.setFingerprintInDark(value) ? "ok" : "invalid-value"
+    }
+
+    function favorites(): string {
+      return root.favorites.join("\n")
+    }
+
+    function toggleFavorite(id: string): string {
+      return root.toggleFavorite(id) ? (root.favorites.indexOf(id) !== -1 ? "on" : "off") : "unknown-design"
+    }
+
+    function wallpaperBlur(): string {
+      return root.wallpaperBlur
+    }
+
+    function setWallpaperBlur(value: string): string {
+      return root.setWallpaperBlur(value) ? "ok" : "invalid-value"
+    }
+
+    function reduceMotion(): string {
+      return root.reduceMotion
+    }
+
+    function setReduceMotion(value: string): string {
+      return root.setReduceMotion(value) ? "ok" : "invalid-value"
+    }
+
+    function fieldItems(): string {
+      return "layout=" + (root.showLayoutBadge ? "show" : "hide") + " caps=" + (root.showCapsBadge ? "show" : "hide")
+        + " reveal=" + (root.allowPasswordToggle ? "show" : "hide") + " icons=" + (root.showAuthIcons ? "show" : "hide")
+    }
+
+    function setFieldItem(name: string, value: string): string {
+      if (["show", "hide", "on", "off"].indexOf(value) === -1) return "invalid-value"
+      return root.setFieldItem(name, value === "show" || value === "on") ? "ok" : "invalid-item"
+    }
+
+    function language(): string {
+      return root.languageSetting === "auto" ? "auto (" + root.language + ")" : root.language
+    }
+
+    function setLanguage(value: string): string {
+      return root.setLanguage(value) ? "ok" : "invalid-value"
+    }
+
+    function size(): string {
+      return Math.round(root.uiScale * 100) + "%"
+    }
+
+    function setSize(value: string): string {
+      return root.setUiScale(value) ? "ok" : "invalid-value"
+    }
+
+    function wallpaperDim(): string {
+      return root.wallpaperDim
+    }
+
+    function setWallpaperDim(value: string): string {
+      return root.setWallpaperDim(value) ? "ok" : "invalid-value"
+    }
+
+    function wakeGrace(): string {
+      return String(root.wakeInputGrace)
+    }
+
+    function setWakeGrace(value: string): string {
+      return root.setWakeGrace(value) ? "ok" : "invalid-value"
+    }
+
+    function faceStart(): string {
+      return root.faceStart
+    }
+
+    function setFaceStart(value: string): string {
+      return root.setFaceStart(value) ? "ok" : "invalid-value (always, wake or off)"
     }
 
     function boot(): string {
@@ -3188,13 +5463,38 @@ echo "$out"
       return "ok"
     }
 
+    // Takes out the passwordless rotation helper earlier versions installed
+    // (one polkit prompt); "absent" when there is none.
+    function removeBootRotationHelper(): string {
+      if (!root.bootRotateHelperInstalled) return "absent"
+      return root.removeBootRotationHelper() ? "ok" : "busy"
+    }
+
     function setBootClipSeconds(value: string): string {
       return root.setBootClipSeconds(value) ? "ok" : "failed"
     }
 
+    // design or plain, see bootShutdown.
+    function bootShutdown(): string {
+      return root.bootShutdown
+    }
+
+    function setBootShutdown(value: string): string {
+      return root.setBootShutdown(value) ? "ok" : "invalid-value (design or plain)"
+    }
+
+    // show or hide, see bootClock.
+    function bootClock(): string {
+      return root.bootClock
+    }
+
+    function setBootClock(value: string): string {
+      return root.setBootClock(value) ? "ok" : "invalid-value (show or hide)"
+    }
+
     function previewDesign(id: string): string {
       root.rescanUserDesigns()
-      if (!Designs.byId(String(id || ""))) return "unknown-design"
+      if (!Designs.byId(String(id || ""), root.userDesigns)) return "unknown-design"
       root.previewDesignId = String(id)
       root.previewUnlocking = false
       root.refreshBackground()
@@ -3230,7 +5530,7 @@ echo "$out"
 
     function previewUnlock(): string {
       if (!root.previewVisible) return "no-preview"
-      var pd = Designs.byId(root.previewDesignId.length > 0 ? root.previewDesignId : root.designId)
+      var pd = Designs.byId(root.previewDesignId.length > 0 ? root.previewDesignId : root.designId, root.userDesigns)
       if (pd && pd.clip) {
         root.previewClipPlaying = true
         return "ok"
@@ -3265,7 +5565,7 @@ echo "$out"
     }
 
     function editDesign(id: string): string {
-      var d = Designs.byId(String(id || ""))
+      var d = Designs.byId(String(id || ""), root.userDesigns)
       if (!d || !d.path) return "not-a-custom-design"
       Quickshell.execDetached(["omarchy-launch-editor", decodeURIComponent(d.path.replace(/^file:\/\//, ""))])
       return "ok"
@@ -3405,16 +5705,25 @@ echo "$out"
       return root.playSting() ? "ok" : "busy"
     }
 
+    // The side panel or the full explorer, whichever Settings > System >
+    // Opens as says.
     function explore(): string {
-      root.rescanUserDesigns()
-      if (root.shell && typeof root.shell.summon === "function")
-        return root.shell.summon(root.pluginId, "{}") ? "ok" : "failed"
-      return "no-shell"
+      return root.summonExplorer(root.openAs)
+    }
+
+    // The same, whatever the setting says.
+    function explorePanel(): string {
+      return root.summonExplorer("panel")
+    }
+
+    function exploreFull(): string {
+      return root.summonExplorer("full")
     }
 
     // Open the built-in editor on a custom boot layout.
     function editBootLayout(name: string): string {
-      root.loadBootDesign(String(name || ""))
+      if (!root.loadBootDesign(String(name || ""))) return "invalid-name"
+      root.exploreViewRequested("full")
       if (root.shell && typeof root.shell.summon === "function")
         return root.shell.summon(root.pluginId, "{}") ? "ok" : "failed"
       return "no-shell"
@@ -3425,6 +5734,7 @@ echo "$out"
     function exploreTab(tab: string): string {
       root.rescanUserDesigns()
       root.exploreTabRequested(String(tab || "styling"))
+      root.exploreViewRequested("full")
       if (root.shell && typeof root.shell.summon === "function")
         return root.shell.summon(root.pluginId, "{}") ? "ok" : "failed"
       return "no-shell"

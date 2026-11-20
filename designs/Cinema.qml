@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 DesignBase {
   id: lock
@@ -28,7 +29,7 @@ DesignBase {
       anchors.left: parent.left
       anchors.leftMargin: lock.pad
       anchors.verticalCenter: parent.verticalCenter
-      opacity: lock.snapshotMode ? 0 : 1
+      opacity: lock.hideTime ? 0 : 1
       text: lock.clock("HH:mm")
       color: "#f2f2f2"
       font.family: Style.font.family
@@ -39,8 +40,8 @@ DesignBase {
       anchors.right: parent.right
       anchors.rightMargin: lock.pad
       anchors.verticalCenter: parent.verticalCenter
-      opacity: lock.snapshotMode ? 0 : 1
-      text: Qt.formatDate(lock.now, "dddd d MMMM yyyy").toUpperCase()
+      opacity: lock.hideTime ? 0 : 1
+      text: lock.date("dddd d MMMM yyyy").toUpperCase()
       color: "#bdbdbd"
       font.family: Style.font.family
       font.pixelSize: Style.font.subtitle
@@ -61,10 +62,10 @@ DesignBase {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: lock.errorState ? lock.failureMessage
-          : (lock.authenticatingPassword ? "Checking…"
-          : lock.greeting() + ", " + lock.userName + ". Enter your password to continue.")
+          : (lock.authenticatingPassword ? lock.tr("Checking…")
+          : lock.greeting() + ", " + lock.displayName + ". Enter your password to continue.")
         textFormat: Text.PlainText
-        color: lock.errorState ? Color.lock.textError : "#f2f2f2"
+        color: lock.errorState ? Commons.Color.lock.textError : "#f2f2f2"
         font.family: Style.font.family
         font.pixelSize: Style.font.heading
         font.italic: true
@@ -79,7 +80,7 @@ DesignBase {
         outlineThickness: 1
         showLockGlyph: false
         color: "#161616"
-        placeholder: "Password"
+        placeholder: lock.tr("Password")
       }
     }
   }

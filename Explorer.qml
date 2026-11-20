@@ -3,11 +3,14 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "designs"
 import "Designs.js" as Designs
+import "designs/Bounded.js" as Bounded
 import "Designer.js" as Layout
 import "Bridge.js" as Bridge
+import "ExplorerStrings.js" as UiText
 
 Item {
   id: root
@@ -16,6 +19,7 @@ Item {
   property var shell: null
   property var manifest: null
   property var service: null
+  readonly property var userDesigns: service && service.userDesigns ? service.userDesigns : []
 
   // Omarchy 4.0.3 hands this overlay `service = null`: the service is an
   // authentication service (a clone of omarchy.lock) and the host keeps those
@@ -65,6 +69,7 @@ Item {
   // otherwise).
   onOpenedChanged: {
     if (!opened) return
+    thumbSlots = 0
     Quickshell.execDetached(["omarchy-shell", "osd", "close"])
     // The entries can be added or removed outside the explorer too.
     if (root.service && typeof root.service.refreshMenuEntry === "function") root.service.refreshMenuEntry()
@@ -76,6 +81,186 @@ Item {
   }
   property int selectedIndex: 0
   property bool fullPreview: false
+  // Which of the two this overlay is showing: the side panel (SidePanel.qml)
+  // or the full explorer. `omarchy-shell lock explore` asks for the one picked
+  // in Settings; a reopen nobody asked a view for, after a file dialog say,
+  // comes back to the one that was up.
+  property string view: "full"
+  readonly property bool sideView: view === "panel"
+  property string requestedView: ""
+  property bool everOpened: false
+  readonly property string openAs: {
+    if (service && service.openAs !== undefined) return String(service.openAs)
+    var saved = String(localSettings.entry.openAs || "")
+    return saved === "panel" || saved === "full" ? saved : "full"
+  }
+  readonly property var openAsOptions: [{ id: "panel", name: root.tr("Side panel") }, { id: "full", name: root.tr("Full explorer") }]
+  readonly property bool barIconShown: !!service && service.barIconShown === true
+  readonly property bool followTheme: !!service && service.followTheme === true
+  readonly property string rotateDesigns: service && service.rotateDesigns !== undefined ? String(service.rotateDesigns) : "off"
+  readonly property var rotateDesignsOptions: [{ id: "off", name: root.tr("Off") }, { id: "lock", name: root.tr("Each lock") }, { id: "day", name: root.tr("Each day") }]
+  readonly property string ownerMessage: service && service.ownerMessage !== undefined ? String(service.ownerMessage) : ""
+  readonly property int ownerMessageMaxLength: service && service.ownerMessageMaxLength ? service.ownerMessageMaxLength : 120
+  // The owner message box has the keyboard; the key catcher leaves it alone.
+  property bool ownerEditing: false
+
+  // The side panel's first-open tour (drawn in SidePanel.qml): -1 is off.
+  // It runs once, the first time the panel opens, and again from Settings.
+  property int tourStep: -1
+  readonly property int tourSteps: 3
+  // Kept here as well, for a session where nothing can be saved.
+  property bool tourDone: false
+  readonly property bool tourSeen: service && service.tourSeen !== undefined ? service.tourSeen === true : tourDone
+  function nextTourStep() {
+    if (tourStep >= tourSteps - 1) endTour()
+    else tourStep += 1
+  }
+  function endTour() {
+    tourStep = -1
+    tourDone = true
+    if (root.service && typeof root.service.setTourSeen === "function") root.service.setTourSeen(true)
+    refocus()
+  }
+  function replayTour() {
+    root.tourDone = false
+    root.showPanel()
+    root.tourStep = 0
+  }
+  function setBarIcon(on) {
+    if (!root.service || typeof root.service.setBarIcon !== "function") return
+    root.service.setBarIcon(on)
+  }
+  function setOpenAs(id) {
+    if (!root.service || typeof root.service.setOpenAs !== "function") return
+    root.service.setOpenAs(id)
+  }
+
+  // From the side panel into the full explorer, on the design that was
+  // selected there, and back.
+  function openFull(tab) {
+    if (root.tourStep >= 0) root.endTour()
+    root.view = "full"
+    if (tab && tab.length > 0) root.mainTab = tab
+    root.thumbSlots = 0
+    refocus()
+    revealTimer.restart()
+  }
+  function showPanel() {
+    if (!root.gridTab) root.mainTab = "styling"
+    root.fullPreview = false
+    root.view = "panel"
+    refocus()
+    Qt.callLater(function() { root.reveal(GridView.Contain) })
+  }
+
+  function lockNow() {
+    root.dismiss()
+    Quickshell.execDetached(["omarchy-shell", "lock", "lock"])
+  }
+
+  // Enter in the side panel: the design becomes the lock screen and the panel
+  // stays, since trying the next one is the likely next move.
+  // `everywhere`: Shift+Enter, a pick for every theme while the design follows the theme.
+  function useSelected(everywhere) {
+    if (selectedDesign) root.useDesign(selectedDesign.id, false, everywhere)
+  }
+
+  // The side panel's keys. It has no pages of its own, so the ones that are
+  // pages in the full explorer open it there.
+  function sideKey(event) {
+    if (root.tourStep >= 0) {
+      // The tour takes the keys until it is done; Esc is handled before this.
+      if (event.key === Qt.Key_Left || event.key === Qt.Key_Up || event.key === Qt.Key_Backspace)
+        root.tourStep = Math.max(0, root.tourStep - 1)
+      else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space
+               || event.key === Qt.Key_Right || event.key === Qt.Key_Down)
+        root.nextTourStep()
+      event.accepted = true
+      return
+    }
+    var tabs = ["favorites", "styling", "animation"]
+    function stepTab(step) {
+      root.searchText = ""
+      root.mainTab = tabs[(Math.max(0, tabs.indexOf(root.mainTab)) + step + tabs.length) % tabs.length]
+    }
+    event.accepted = true
+    if (event.text === "/" || (event.key === Qt.Key_F && (event.modifiers & Qt.ControlModifier))) {
+      root.fullPreview = false
+      root.focusSearch()
+    } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+      root.useSelected(root.followTheme && (event.modifiers & Qt.ShiftModifier) !== 0)
+      root.fullPreview = false
+    } else if (event.key === Qt.Key_Space || event.key === Qt.Key_P) {
+      root.fullPreview = !root.fullPreview
+    } else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) {
+      root.move(-1)
+    } else if (event.key === Qt.Key_Down || event.key === Qt.Key_J) {
+      root.move(1)
+    } else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) {
+      if (root.fullPreview) root.move(-1); else stepTab(-1)
+    } else if (event.key === Qt.Key_Right || event.key === Qt.Key_L) {
+      if (root.fullPreview) root.move(1); else stepTab(1)
+    } else if (event.key === Qt.Key_Tab) {
+      stepTab(1)
+    } else if (event.key === Qt.Key_Backtab) {
+      stepTab(-1)
+    } else if (event.key === Qt.Key_Home) {
+      root.selectedIndex = 0; root.reveal(GridView.Beginning)
+    } else if (event.key === Qt.Key_End) {
+      root.selectedIndex = Math.max(0, root.designs.length - 1); root.reveal(GridView.End)
+    } else if (event.key === Qt.Key_PageDown) {
+      sidePanel.page(1)
+    } else if (event.key === Qt.Key_PageUp) {
+      sidePanel.page(-1)
+    } else if (event.key === Qt.Key_F) {
+      if (root.selectedDesign && root.service && typeof root.service.toggleFavorite === "function")
+        root.service.toggleFavorite(root.selectedDesign.id)
+    } else if (event.key === Qt.Key_O) {
+      root.openFull("")
+    } else if (event.key === Qt.Key_U) {
+      root.openFull("settings")
+    } else if (event.key === Qt.Key_B) {
+      root.openFull("boot")
+    } else {
+      event.accepted = false
+    }
+  }
+  // The ? sheet: every key the explorer takes, over whatever page is open.
+  property bool showingKeys: false
+  // Widest row of key caps, so every description starts on one line.
+  property real keyCapsWidth: 0
+  readonly property var keySections: [
+    { title: "Browse", rows: [
+      { keys: ["←", "→", "↑", "↓"], text: "Move between designs" },
+      { keys: ["H", "J", "K", "L"], text: "The same, Vim style" },
+      { keys: ["Home", "End"], text: "First and last design" },
+      { keys: ["PgUp", "PgDn"], text: "Scroll a page" },
+      { keys: ["Space", "P"], text: "Full-size preview" },
+      { keys: ["Enter"], text: "Use the selected design" },
+      { keys: ["/", "Ctrl+F"], text: "Search every design" },
+      { keys: ["F"], text: "Star it, or unstar it, for Favorites" }
+    ] },
+    { title: "Your designs", rows: [
+      { keys: ["D"], text: "Designer: this one if made there, else a new default layout" },
+      { keys: ["C", "Shift+C"], text: "Edit your code copy of it, or a fresh copy" },
+      { keys: ["E"], text: "Edit a design of your own" },
+      { keys: ["N"], text: "New code design from the blank template" },
+      { keys: ["X", "Del"], text: "Delete your own design (press twice)" }
+    ] },
+    { title: "Pictures and video", rows: [
+      { keys: ["A", "Shift+A"], text: "Pick or clear the profile picture" },
+      { keys: ["V", "Shift+V"], text: "Pick or clear the Motion video" },
+      { keys: ["S", "Shift+S"], text: "Pick or clear the unlock clip" }
+    ] },
+    { title: "Pages", rows: [
+      { keys: ["Tab", "Shift+Tab"], text: "Styling, Animation, Favorites" },
+      { keys: ["U"], text: "Settings" },
+      { keys: ["B"], text: "Boot screen" },
+      { keys: ["O"], text: "Side panel" },
+      { keys: ["?"], text: "This list" },
+      { keys: ["Esc"], text: "Back, or close the explorer" }
+    ] }
+  ]
   property bool editing: false
   property var editingDesign: null
   // The visual designer, which takes over the card the same way the code
@@ -85,12 +270,111 @@ Item {
   property var designingDesign: null
   property bool designerPaused: false
   property string category: "all"
+  // Type-to-filter over every design, from the field in the header (/ or
+  // Ctrl+F). While it is non-empty the grid shows matches from all of them,
+  // whichever sidebar entry is picked.
+  property string searchText: ""
+  property bool searching: false
+  onSearchTextChanged: { selectedIndex = 0; reveal(GridView.Beginning) }
+  readonly property var favoriteIds: service && service.favorites ? service.favorites : []
+  function isFavorite(id) { return root.favoriteIds.indexOf(id) !== -1 }
+  function favoriteDesigns() {
+    return Designs.all(root.userDesigns).filter(function(d) { return root.favoriteIds.indexOf(d.id) !== -1 })
+  }
+  function matchesSearch(d, words) {
+    var hay = [d.name, d.id, d.description || ""].concat(d.tags || []).join(" ").toLowerCase()
+    for (var i = 0; i < words.length; i++) if (hay.indexOf(words[i]) === -1) return false
+    return true
+  }
+  // Things that stop part of the plugin working here, each with the way out.
+  // Shown at the top of Settings, and only when there is something to say.
+  readonly property bool multimediaMissing: !!service && service.multimediaAvailable === false
+  readonly property var healthIssues: {
+    var list = []
+    if (root.multimediaMissing)
+      list.push({ text: root.tr("Video designs, clip designs and the unlock clip need qt6-multimedia, which Omarchy does not install."),
+                  packages: ["qt6-multimedia"] })
+    if (root.wallpaperBroken && root.wallpaperIsWebp)
+      list.push({ text: root.tr("Your wallpaper is WebP, which the shell can only read with qt6-imageformats."),
+                  packages: ["qt6-imageformats"] })
+    var dirs = service && service.shadowingDirs ? service.shadowingDirs : []
+    if (dirs.length > 0)
+      list.push({ text: root.tr("Another copy of this plugin may load instead of this one: %1. Move it out of ~/.config/omarchy/plugins/ (to ~/.local/share/omarchy/lock-explorer-backups) and restart the shell.").arg(dirs.join(", ")),
+                  packages: [], fix: "copies" })
+    var rivals = service && service.rivalLockPlugins ? service.rivalLockPlugins : []
+    if (rivals.length > 0)
+      list.push({ text: root.tr("Another lock screen plugin is enabled too: %1. Only one of them gets omarchy-shell lock. Keep one: omarchy plugin disable %2 && omarchy restart shell").arg(rivals.join(", ")).arg(rivals[0]),
+                  packages: [] })
+    return list
+  }
+
+  function installPackages(names) {
+    if (!root.service || typeof root.service.installPackages !== "function") return
+    root.dismiss()
+    root.service.installPackages(names)
+  }
+
+  readonly property bool movingCopies: !!service && service.movingCopies === true
+  function moveCopies() {
+    if (!root.service || typeof root.service.moveCopies !== "function" || root.movingCopies) return
+    root.service.moveCopies()
+  }
+
+  function runDoctor() {
+    if (!root.service || typeof root.service.runDoctor !== "function") return
+    root.dismiss()
+    root.service.runDoctor()
+  }
+
+  readonly property bool gridTab: mainTab === "styling" || mainTab === "animation" || mainTab === "seasonal" || mainTab === "favorites"
 
   readonly property var categories: Designs.categories()
+
+  // A picture of each grid preview, taken once it has settled. A card that
+  // comes back -- a search, another tab -- shows it at once while its live
+  // design builds again on top, instead of an empty frame. Everything a
+  // preview draws from is in the key, and a change to any of it starts over.
+  property var thumbCache: ({})
+  readonly property string thumbStateKey: [
+    service ? service.designsRevision : 0,
+    service ? service.backgroundPath : "", service ? service.backgroundVersion : 0,
+    service ? service.avatarPath : "", service ? service.avatarVersion : 0,
+    lockLanguage, accountName, twelveHour, wallpaperBlurValue, wallpaperDimShift, uiScale, motionReduced,
+    showLayoutBadge, showCapsBadge, allowPasswordToggle, showAuthIcons,
+    String(Commons.Color.lock.text), String(Commons.Color.lock.background), String(Commons.Color.background), thumbWidth
+  ].join("|")
+  onThumbStateKeyChanged: thumbCache = ({})
+  function thumbFor(id) {
+    var entry = thumbCache[id]
+    return entry ? String(entry.url) : ""
+  }
+  function keepThumb(id, key, result) {
+    if (key !== thumbStateKey) return
+    var next = {}
+    for (var k in thumbCache) next[k] = thumbCache[k]
+    next[id] = result
+    thumbCache = next
+  }
+
+  // Live previews start one after another, from the top-left of what is on
+  // screen, rather than all at once and finishing in whatever order.
+  property int thumbSlots: 0
+  readonly property int gridTopRow: grid.cellHeight > 0 ? Math.floor(grid.contentY / grid.cellHeight) : 0
+  onGridTopRowChanged: thumbSlots = 0
+  Timer {
+    interval: 40
+    repeat: true
+    running: root.opened && !root.sideView && root.gridTab && root.thumbSlots < root.columns * 5
+    onTriggered: root.thumbSlots += 1
+  }
   readonly property var designs: {
     var r = service ? service.designsRevision : 0
-    if (mainTab === "animation") return Designs.animations()
-    return Designs.stylings()
+    var words = searchText.trim().toLowerCase().split(/\s+/).filter(function(w) { return w.length > 0 })
+    if (words.length > 0) return Designs.all(root.userDesigns).filter(function(d) { return root.matchesSearch(d, words) })
+    if (mainTab === "animation") return Designs.animations(root.userDesigns)
+    if (mainTab === "seasonal") return Designs.seasonal(root.userDesigns)
+    if (mainTab === "favorites") return favoriteDesigns()
+    return Designs.stylings(root.userDesigns)
   }
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.sirjul1337.lock-explorer"
   readonly property string activeDesignId: service ? service.designId
@@ -112,13 +396,64 @@ Item {
   readonly property bool keepDisplayOn: service ? service.keepDisplayOn : false
   readonly property int blankDelay: service ? service.blankDelay : 5000
   readonly property var blankPresets: [5000, 15000, 30000, 60000, 300000]
+  readonly property int wakeGrace: service && service.wakeGrace !== undefined ? service.wakeGrace : 1000
+  readonly property bool powerActions: service && service.powerActions === true
+  readonly property bool awayReport: !service || service.awayReport !== false
+  readonly property bool lockOnKeyRemoval: service && service.lockOnKeyRemoval === true
+  readonly property bool wakeOnKeyInsert: service && service.wakeOnKeyInsert === true
+  readonly property bool fingerprintInDark: !service || service.fingerprintInDark !== false
+  readonly property string wallpaperBlur: service && service.wallpaperBlur !== undefined ? String(service.wallpaperBlur) : "design"
+  readonly property string wallpaperDim: service && service.wallpaperDim !== undefined ? String(service.wallpaperDim) : "design"
+  readonly property real wallpaperBlurValue: service && service.wallpaperBlurValue !== undefined ? service.wallpaperBlurValue : -1
+  readonly property real wallpaperDimShift: service && service.wallpaperDimShift !== undefined ? service.wallpaperDimShift : 0
+  readonly property string reduceMotion: service && service.reduceMotion !== undefined ? String(service.reduceMotion) : "off"
+  readonly property bool motionReduced: !!service && service.motionReduced === true
+  readonly property real uiScale: service && service.uiScale !== undefined ? service.uiScale : 1
+  readonly property string accountName: service && service.accountName !== undefined ? String(service.accountName) : ""
+  readonly property string lockLanguage: service && service.language !== undefined ? String(service.language) : "en"
+  // The explorer speaks the lock screen's language (ExplorerStrings.js).
+  function tr(text) { return UiText.tr(root.lockLanguage, text) }
+  readonly property string languageSetting: service && service.languageSetting !== undefined ? String(service.languageSetting) : "auto"
+  readonly property var languageChoices: {
+    var list = service && service.languages ? service.languages : []
+    var system = service && service.systemLanguage ? String(service.systemLanguage) : "en"
+    var sysName = "English"
+    for (var i = 0; i < list.length; i++) if (list[i].id === system) sysName = list[i].name
+    return [{ id: "auto", name: root.tr("System (%1)").arg(sysName) }].concat(list.map(function(l) { return { id: l.id, name: l.name } }))
+  }
+  readonly property var reduceMotionChoices: [
+    { id: "off", name: root.tr("Off") }, { id: "on", name: root.tr("On") }, { id: "battery", name: root.tr("On battery") }
+  ]
+  readonly property var uiScaleChoices: [
+    { id: 1, name: "100%" }, { id: 1.25, name: "125%" }, { id: 1.5, name: "150%" }
+  ]
+  readonly property var wallpaperBlurChoices: [
+    { id: "design", name: root.tr("As designed") }, { id: "sharp", name: root.tr("Sharp") },
+    { id: "soft", name: root.tr("Soft") }, { id: "heavy", name: root.tr("Heavy") }
+  ]
+  readonly property var wallpaperDimChoices: [
+    { id: "lighter", name: root.tr("Lighter") }, { id: "design", name: root.tr("As designed") }, { id: "darker", name: root.tr("Darker") }
+  ]
+  readonly property bool faceConfigured: service && service.faceConfigured === true
+  readonly property string faceStart: service && service.faceStart !== undefined ? String(service.faceStart) : "wake"
+  readonly property var onOffOptions: [{ id: "on", name: root.tr("On") }, { id: "off", name: root.tr("Off") }]
+  readonly property var shownHiddenOptions: [{ id: "show", name: root.tr("Show") }, { id: "hide", name: root.tr("Hide") }]
+  // What the password field shows beside the text (Settings > Password field).
+  readonly property bool showLayoutBadge: !service || service.showLayoutBadge !== false
+  readonly property bool showCapsBadge: !service || service.showCapsBadge !== false
+  readonly property bool allowPasswordToggle: !service || service.allowPasswordToggle !== false
+  readonly property bool showAuthIcons: !service || service.showAuthIcons !== false
+  function setFieldItem(name, show) {
+    if (!root.service || typeof root.service.setFieldItem !== "function") return
+    root.service.setFieldItem(name, show)
+  }
   property bool customDelayEditing: false
   property string customDelayText: ""
   readonly property bool blankDelayIsCustom: !root.keepDisplayOn && root.blankPresets.indexOf(root.blankDelay) === -1
   readonly property string unlockLabel: {
     for (var i = 0; i < unlockOptions.length; i++)
-      if (unlockOptions[i].id === unlockAnimation) return unlockOptions[i].name
-    return "Off"
+      if (unlockOptions[i].id === unlockAnimation) return root.tr(unlockOptions[i].name)
+    return root.tr("Off")
   }
   // Top level view: the design grid, or one of the settings pages.
   property string mainTab: "styling"
@@ -133,11 +468,15 @@ Item {
   }
 
   function handleEscape() {
+    if (showingKeys) { showingKeys = false; return }
+    if (searchText.length > 0 && gridTab) { searchText = ""; return }
     if (confirmingDelete.length > 0) { confirmingDelete = ""; return }
     if (designing) { designerView.requestClose(); return }
     if (editing) { closeEditor(); return }
     if (bootEditing.length > 0) { closeBootEditor(); return }
     if (fullPreview) { fullPreview = false; return }
+    if (sideView && tourStep >= 0) { endTour(); return }
+    if (sideView) { dismiss(); return }
     if (mainTab !== "styling") { mainTab = "styling"; refocus(); return }
     dismiss()
   }
@@ -146,7 +485,10 @@ Item {
   // confirms. Esc or moving the selection disarms.
   property string confirmingDelete: ""
   onSelectedIndexChanged: confirmingDelete = ""
-  onDesignsChanged: if (selectedIndex >= designs.length) selectedIndex = Math.max(0, designs.length - 1)
+  onDesignsChanged: {
+    if (selectedIndex >= designs.length) selectedIndex = Math.max(0, designs.length - 1)
+    thumbSlots = 0
+  }
 
   function deleteSelected() {
     var d = root.selectedDesign
@@ -166,21 +508,37 @@ Item {
 
   function refocus() { Qt.callLater(function() { keyCatcher.forceActiveFocus() }) }
 
+  function focusSearch() {
+    root.searching = true
+    if (root.sideView) { sidePanel.focusSearch(); return }
+    Qt.callLater(function() { searchInput.forceActiveFocus(); searchInput.selectAll() })
+  }
+
+  function leaveSearch() {
+    root.searching = false
+    refocus()
+  }
+
   // Quick setting for the boot (LUKS decrypt) screen, applied through
   // `omarchy-shell lock setBoot`. Only designs with a Plymouth twin under
   // plymouth/ can style it; "follow" tracks the lock design when it has one.
   readonly property string followHint: {
-    var d = Designs.byId(activeDesignId)
-    var name = d ? d.name : "your lock screen"
-    if (d && d.boot === true) return "Boot matches " + name + " with its animated twin"
-    return "Boot matches " + name + " as a still — same styling for both"
+    var d = Designs.byId(activeDesignId, root.userDesigns)
+    var name = d ? d.name : root.tr("your lock screen")
+    if (d && d.boot === true) return root.tr("Boot matches %1 with its animated twin").arg(name)
+    return root.tr("Boot matches %1 as a still — same styling for both").arg(name)
   }
+  // What the boot layout form's dropdowns show for each value.
+  readonly property var bootOptionNames: ({
+    theme: root.tr("Theme"), wallpaper: root.tr("Wallpaper"), none: root.tr("None"),
+    pill: root.tr("Pill"), line: root.tr("Line")
+  })
   function bootKindLabel(d) {
-    if (!d || !d.bootKind) return "theme styling"
-    if (d.bootKind === "clip") return "clip \u00b7 plays on unlock"
-    if (d.bootKind === "reactive") return "reacts to typing"
-    if (d.bootKind === "animated") return "animated"
-    return "theme styling"
+    if (!d || !d.bootKind) return root.tr("theme styling")
+    if (d.bootKind === "clip") return root.tr("clip") + " \u00b7 " + root.tr("plays on unlock")
+    if (d.bootKind === "reactive") return root.tr("reacts to typing")
+    if (d.bootKind === "animated") return root.tr("animated")
+    return root.tr("theme styling")
   }
   readonly property var bootTwins: {
     var twins = Designs.bootCapable()
@@ -192,42 +550,44 @@ Item {
   readonly property string bootApplied: service ? service.bootApplied : ""
   readonly property string bootAppliedTheme: service ? service.bootAppliedTheme : ""
   readonly property string bootNowName: {
-    if (bootApplied.length === 0) return "Stock Omarchy"
-    if (bootApplied === "theme") return "Theme colors"
+    if (bootApplied.length === 0) return root.tr("Stock Omarchy")
+    if (bootApplied === "theme") return root.tr("Theme colors")
     if (bootApplied.indexOf("snapshot:") === 0) {
-      var sd = Designs.byId(bootApplied.substring(9))
-      return (sd ? sd.name : bootApplied.substring(9)) + " (snapshot)"
+      var sd = Designs.byId(bootApplied.substring(9), root.userDesigns)
+      return root.tr("%1 (snapshot)").arg(sd ? sd.name : bootApplied.substring(9))
     }
     if (bootApplied.indexOf("custom:") === 0) return bootApplied.substring(7)
     if (bootApplied.indexOf("video:") === 0) return bootApplied.substring(6).replace(/\.[^.]+$/, "")
-    var d = Designs.byId(bootApplied)
+    var d = Designs.byId(bootApplied, root.userDesigns)
     return d ? d.name : bootApplied
   }
   readonly property var bootVideos: service && service.bootVideos !== undefined ? service.bootVideos : []
   readonly property var bootCustomDesigns: service && service.bootCustomDesigns !== undefined ? service.bootCustomDesigns : []
   readonly property int bootClipSeconds: service && service.bootClipSeconds !== undefined ? service.bootClipSeconds : 0
+  readonly property string bootShutdown: service && service.bootShutdown !== undefined ? service.bootShutdown : "design"
+  readonly property string bootClock: service && service.bootClock !== undefined ? service.bootClock : "show"
   readonly property var bootCards: {
     var cards = [
-      { id: "stock", name: "Untouched", kind: "stock Omarchy splash" },
-      { id: "theme", name: "Theme colors", kind: "stock layout, your theme" }
+      { id: "stock", name: root.tr("Untouched"), kind: root.tr("stock Omarchy splash") },
+      { id: "theme", name: root.tr("Theme colors"), kind: root.tr("stock layout, your theme") }
     ]
     var claimed = {}
     var twins = Designs.bootCapable()
     for (var i = 0; i < twins.length; i++) {
-      cards.push({ id: twins[i].id, name: twins[i].name, kind: bootKindLabel(twins[i]) + (twins[i].credit ? " \u00b7 by " + twins[i].credit : "") })
+      cards.push({ id: twins[i].id, name: twins[i].name, kind: bootKindLabel(twins[i]) + (twins[i].credit ? " \u00b7 " + root.tr("by %1").arg(twins[i].credit) : "") })
       if (twins[i].clipFile) claimed[twins[i].clipFile] = true
     }
     for (var v = 0; v < bootVideos.length; v++) {
       if (claimed[bootVideos[v]]) continue
-      cards.push({ id: "video:" + bootVideos[v], name: bootVideos[v].replace(/\.[^.]+$/, ""), kind: "your clip \u00b7 plays on unlock" })
+      cards.push({ id: "video:" + bootVideos[v], name: bootVideos[v].replace(/\.[^.]+$/, ""), kind: root.tr("your clip") + " \u00b7 " + root.tr("plays on unlock") })
     }
     for (var c = 0; c < bootCustomDesigns.length; c++)
-      cards.push({ id: "custom:" + bootCustomDesigns[c], name: bootCustomDesigns[c], kind: "your layout" })
+      cards.push({ id: "custom:" + bootCustomDesigns[c], name: bootCustomDesigns[c], kind: root.tr("your layout") })
     return cards
   }
   readonly property string bootFollowTarget: {
     if (bootSetting !== "follow") return ""
-    var d = Designs.byId(activeDesignId)
+    var d = Designs.byId(activeDesignId, root.userDesigns)
     return d && d.boot === true ? d.id : ""
   }
   readonly property int bootPreviewsVersion: service && service.bootPreviewsVersion !== undefined ? service.bootPreviewsVersion : 0
@@ -366,21 +726,81 @@ Item {
   // 1920x1080. Plymouth scales the capture to the framebuffer, so a 16:9 grab
   // on an ultrawide came out stretched; and a responsive design laid out for
   // 1920 wide is the wrong composition at 3440 even before any stretch.
-  readonly property var snapshotScreen: panel.screen
-  readonly property int snapshotWidth: snapshotScreen && snapshotScreen.width > 0 ? snapshotScreen.width : 1920
-  readonly property int snapshotHeight: snapshotScreen && snapshotScreen.height > 0 ? snapshotScreen.height : 1080
+  // The window that renders the snapshot decides its geometry. A headless
+  // snapshot can run before the explorer has ever been mapped, when
+  // panel.screen may still be empty and the grab would fall to 1920x1080.
+  readonly property var snapshotScreen: snapshotWindow.screen || panel.screen || (Quickshell.screens.length > 0 ? Quickshell.screens[0] : null)
+  // A design is laid out for the size it is rendered at, so one capture only
+  // fits monitors of that shape: with a 3440x1440 and a 2560x1440 display the
+  // second showed the ultrawide layout shrunk to fit, banded top and bottom
+  // (issue #38). Every other monitor size gets a pass of its own; pass 0 is
+  // the snapshot screen and keeps the old file names, the others are saved
+  // as <id>@<W>x<H>.png and apply.sh hands them to the boot theme, which
+  // gives each head the capture whose shape matches it.
+  // Every pass, the first included, has its size fixed when the flow starts:
+  // the snapshot window is not mapped yet then and lands on another screen
+  // once it is, so a size read from it mid-flow made the "other" pass repeat
+  // the main one and the second monitor's size was never captured.
+  property var snapshotPasses: []
+  property int snapshotPass: 0
+  property string snapshotExtraRects: ""
+  property var snapshotQueued: null
+  readonly property var snapshotPassSize: snapshotPass < snapshotPasses.length ? snapshotPasses[snapshotPass] : null
+  readonly property string snapshotSuffix: snapshotPass > 0 && snapshotPassSize ? "@" + snapshotPassSize.key : ""
+  readonly property int snapshotWidth: snapshotPassSize ? snapshotPassSize.w : (snapshotScreen && snapshotScreen.width > 0 ? snapshotScreen.width : 1920)
+  readonly property int snapshotHeight: snapshotPassSize ? snapshotPassSize.h : (snapshotScreen && snapshotScreen.height > 0 ? snapshotScreen.height : 1080)
   // grabToImage wants device pixels; the item is sized in logical ones, so a
   // scaled display still writes a capture at its true framebuffer resolution.
-  readonly property real snapshotScale: snapshotScreen && snapshotScreen.devicePixelRatio > 0 ? snapshotScreen.devicePixelRatio : 1
+  readonly property real snapshotScale: snapshotPassSize ? snapshotPassSize.scale : (snapshotScreen && snapshotScreen.devicePixelRatio > 0 ? snapshotScreen.devicePixelRatio : 1)
   readonly property int snapshotPixelWidth: Math.round(snapshotWidth * snapshotScale)
   readonly property int snapshotPixelHeight: Math.round(snapshotHeight * snapshotScale)
 
   function snapshotAndApply(id, persist) {
     if (root.bootApplying) return
+    // The id names the snapshot files and comes back from the saved boot
+    // setting: a plain design id only.
+    var sid = String(id || "")
+    if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/.test(sid) || sid.indexOf("..") !== -1) return
+    if (!root.service) return
+    // A flow already running would be reset halfway by a second one -- two
+    // settings resyncs on shell start came two seconds apart, and the boxed
+    // and box-free main captures ended up at different monitor sizes. The
+    // newer request waits and runs once this flow is done, in its place.
+    if (root.snapshotBusy) {
+      root.snapshotQueued = { id: sid, persist: persist }
+      root.service.logEvent("snapshot-queued " + sid)
+      return
+    }
     root.snapshotBusy = true
-    snapshotHost.designId = id
+    snapshotHost.designId = sid
+    // One pass per distinct monitor size, the snapshot screen's first: its
+    // capture is the main one, the fallback for a head no capture matches.
+    root.snapshotPass = 0
+    root.snapshotExtraRects = ""
+    var passes = []
+    var seen = {}
+    var screens = [root.snapshotScreen].concat(Quickshell.screens)
+    for (var si = 0; si < screens.length; si++) {
+      var scr = screens[si]
+      if (!scr || !(scr.width > 0) || !(scr.height > 0)) continue
+      var dpr = scr.devicePixelRatio > 0 ? scr.devicePixelRatio : 1
+      var key = Math.round(scr.width * dpr) + "x" + Math.round(scr.height * dpr)
+      if (seen[key] || passes.length >= 4) continue
+      seen[key] = true
+      passes.push({ w: scr.width, h: scr.height, scale: dpr, key: key })
+    }
+    root.snapshotPasses = passes
+    if (root.service) root.service.logEvent("snapshot-passes " + passes.map(function(p) { return p.key }).join(","))
+    // No link left where a grab is saved, and no capture left over from a
+    // monitor that is no longer connected.
+    snapshotMkdirProc.command = Bounded.run(["bash", "-c",
+      'source "$1" && safe_dir "$2" && for f in "$2/$3.png" "$2/$3-plain.png"; do [ ! -L "$f" ] || rm -f -- "$f"; done && for f in "$2/$3"@*.png; do [ ! -e "$f" ] && [ ! -L "$f" ] || rm -f -- "$f"; done',
+      "--", root.service.safePathsLib,
+      Quickshell.env("HOME") + "/.local/state/omarchy/lock-explorer-snapshots", sid], { deadline: 10 })
     // Flip snapshot mode before the render delay so any layout it causes has
     // settled long before the geometry is measured and the frame grabbed.
+    if (snapshotHost.item && snapshotHost.item.snapshotHideClock !== undefined)
+      snapshotHost.item.snapshotHideClock = root.bootClock === "hide"
     if (snapshotHost.item && snapshotHost.item.snapshotMode !== undefined)
       snapshotHost.item.snapshotMode = true
     root.snapshotPersist = persist === undefined ? true : persist
@@ -389,8 +809,10 @@ Item {
 
   Process {
     id: snapshotMkdirProc
-    command: ["mkdir", "-p", Quickshell.env("HOME") + "/.local/state/omarchy/lock-explorer-snapshots"]
+    // The folder through safe-paths, and no link left where a grab is saved
+    // (saveToFile writes through one).
     onExited: function(code) {
+      if (code !== 0) { root.snapshotAbort(); return }
       snapshotRenderTimer.restart()
     }
   }
@@ -401,11 +823,13 @@ Item {
     interval: 1100
     onTriggered: {
       var id = snapshotHost.designId
-      var path = Quickshell.env("HOME") + "/.local/state/omarchy/lock-explorer-snapshots/" + id + ".png"
+      var pass = root.snapshotPass
+      var path = Quickshell.env("HOME") + "/.local/state/omarchy/lock-explorer-snapshots/" + id + root.snapshotSuffix + ".png"
       // The design keeps its input box but empties it (see snapshotMode); the
       // boot theme puts its bullets inside that box, so the boot screen uses
       // the design's own field instead of a generic pill.
       var it = snapshotHost.item
+      if (it && it.snapshotHideClock !== undefined) it.snapshotHideClock = root.bootClock === "hide"
       if (it && it.snapshotMode !== undefined) it.snapshotMode = true
       var rect = ""
       var n = it && it.inputItem ? it.inputItem : null
@@ -425,9 +849,12 @@ Item {
       }
       var grabOk = snapshotSource.grabToImage(function(result) {
         var saved = result && result.saveToFile(path)
-        if (root.service) root.service.logEvent("snapshot-grab " + id + (saved ? " ok rect=" + rect : " save-failed"))
-        if (!saved) { root.snapshotBusy = false; return }
-        root.snapshotRect = rect
+        if (root.service) root.service.logEvent("snapshot-grab " + id + root.snapshotSuffix + (saved ? " ok rect=" + rect : " save-failed"))
+        // A failed extra pass just leaves that monitor on the primary capture.
+        if (!saved) { if (pass > 0) root.snapshotApply(); else root.snapshotAbort(); return }
+        if (pass === 0) root.snapshotRect = rect
+        else if (rect !== "")
+          root.snapshotExtraRects += (root.snapshotExtraRects === "" ? "" : ";") + root.snapshotPassSize.key + "=" + rect
         // Second, box-free grab: apply.sh picks it up as the background for
         // reboot/shutdown and promptless stretches of boot, so the splash
         // never shows a dead entry box (see snapshotBare in DesignBase).
@@ -438,15 +865,17 @@ Item {
           root.snapshotFinish()
         }
       }, Qt.size(root.snapshotPixelWidth, root.snapshotPixelHeight))
+      if (!grabOk && pass > 0) { root.snapshotApply(); return }
       if (!grabOk) {
-        root.snapshotBusy = false
+        var deferredPersist = root.snapshotPersist
+        root.snapshotAbort()
         if (root.service) root.service.logEvent("snapshot-grab-deferred " + id)
         // Never-shown window: park the request for the next open and say so.
         if (!root.pendingResnapshot) {
-          root.pendingResnapshot = { id: id, persist: root.snapshotPersist }
+          root.pendingResnapshot = { id: id, persist: deferredPersist }
           Quickshell.execDetached(["notify-send", "-a", "Lock Screen Explorer",
-            "Boot screen is out of date",
-            "The background changed. Open the lock screen explorer once and it refreshes itself."])
+            root.tr("Boot screen is out of date"),
+            root.tr("The background changed. Open the lock screen explorer once and it refreshes itself.")])
         }
       }
     }
@@ -456,11 +885,38 @@ Item {
   // frame(s) to the service. Split out because the box-free second grab
   // arrives asynchronously.
   function snapshotFinish() {
-    root.snapshotBusy = false
     var it = snapshotHost.item
     if (it && it.snapshotBare !== undefined) it.snapshotBare = false
+    // Next monitor size: resize the render surface and let it lay out again.
+    if (root.snapshotPass + 1 < root.snapshotPasses.length) {
+      root.snapshotPass++
+      snapshotRenderTimer.restart()
+      return
+    }
+    root.snapshotApply()
+  }
+
+  // Ends a flow without applying; a request that came in meanwhile runs now.
+  function snapshotAbort() {
+    root.snapshotBusy = false
+    root.snapshotPass = 0
+    root.snapshotPasses = []
+    var q = root.snapshotQueued
+    root.snapshotQueued = null
+    if (q) root.snapshotAndApply(q.id, q.persist)
+  }
+
+  function snapshotApply() {
+    var it = snapshotHost.item
+    if (it && it.snapshotBare !== undefined) it.snapshotBare = false
+    // A newer request supersedes these captures: grab again instead of
+    // applying twice (one polkit prompt, not two).
+    if (root.snapshotQueued) { root.snapshotAbort(); return }
+    root.snapshotBusy = false
+    root.snapshotPass = 0
+    root.snapshotPasses = []
     if (root.service && typeof root.service.applyBootSnapshot === "function")
-      root.service.applyBootSnapshot(snapshotHost.designId, root.snapshotPersist, root.snapshotRect)
+      root.service.applyBootSnapshot(snapshotHost.designId, root.snapshotPersist, root.snapshotRect, root.snapshotExtraRects)
   }
 
   // One frame is not reliably enough for the opacity change to land in the
@@ -472,10 +928,10 @@ Item {
     interval: 150
     onTriggered: {
       var id = snapshotHost.designId
-      var ppath = Quickshell.env("HOME") + "/.local/state/omarchy/lock-explorer-snapshots/" + id + "-plain.png"
+      var ppath = Quickshell.env("HOME") + "/.local/state/omarchy/lock-explorer-snapshots/" + id + root.snapshotSuffix + "-plain.png"
       var ok = snapshotSource.grabToImage(function(result) {
         var saved = result && result.saveToFile(ppath)
-        if (root.service) root.service.logEvent("snapshot-grab-plain " + id + (saved ? " ok" : " save-failed"))
+        if (root.service) root.service.logEvent("snapshot-grab-plain " + id + root.snapshotSuffix + (saved ? " ok" : " save-failed"))
         root.snapshotFinish()
       }, Qt.size(root.snapshotPixelWidth, root.snapshotPixelHeight))
       if (!ok) root.snapshotFinish()
@@ -488,7 +944,7 @@ Item {
   // setting on "follow".
   function bootUseStyling(id, persist) {
     if (root.bootApplying) return
-    var d = Designs.byId(id)
+    var d = Designs.byId(id, root.userDesigns)
     if (d && d.boot === true) root.setBoot(id)
     else root.snapshotAndApply(id, persist === undefined ? true : persist)
   }
@@ -511,10 +967,10 @@ Item {
     if (bootSetting === "stock") return "Untouched"
     if (bootSetting === "theme") return "Theme colors"
     if (bootSetting === "follow") {
-      var d = Designs.byId(activeDesignId)
+      var d = Designs.byId(activeDesignId, root.userDesigns)
       return d && d.boot === true ? "Match lock (" + d.name + ")" : "Match lock (no twin)"
     }
-    var picked = Designs.byId(bootSetting)
+    var picked = Designs.byId(bootSetting, root.userDesigns)
     return picked ? picked.name : bootSetting
   }
   readonly property bool bootResync: service && service.bootResync !== undefined ? service.bootResync : true
@@ -522,6 +978,20 @@ Item {
   function setBoot(id) {
     if (root.bootApplying) return
     if (root.service && typeof root.service.setBoot === "function") root.service.setBoot(id)
+  }
+
+  function setBootClipSeconds(n) {
+    if (root.service && typeof root.service.setBootClipSeconds === "function") root.service.setBootClipSeconds(n)
+  }
+
+  function setBootClock(v) {
+    if (root.bootApplying) return
+    if (root.service && typeof root.service.setBootClock === "function") root.service.setBootClock(v)
+  }
+
+  function setBootShutdown(v) {
+    if (root.bootApplying) return
+    if (root.service && typeof root.service.setBootShutdown === "function") root.service.setBootShutdown(v)
   }
 
   function toggleBootResync() {
@@ -550,7 +1020,7 @@ Item {
 
   // The launcher and Omarchy menu entries, see extras/install.sh.
   readonly property bool menuEntryInstalled: service && service.menuEntryInstalled === true
-  readonly property var menuEntryOptions: [{ id: "on", name: "Added" }, { id: "off", name: "Not added" }]
+  readonly property var menuEntryOptions: [{ id: "on", name: root.tr("Added") }, { id: "off", name: root.tr("Not added") }]
 
   function setMenuEntry(on) {
     if (root.service && typeof root.service.setMenuEntry === "function") root.service.setMenuEntry(on)
@@ -561,7 +1031,7 @@ Item {
   // it, and never touches PAM itself.
   readonly property bool fido2Installed: service && service.fido2Installed === true
   readonly property bool fido2Enabled: service && service.fido2Enabled !== undefined ? service.fido2Enabled : true
-  readonly property var fido2Options: [{ id: "on", name: "On" }, { id: "off", name: "Off" }]
+  readonly property var fido2Options: [{ id: "on", name: root.tr("On") }, { id: "off", name: root.tr("Off") }]
 
   function setFido2Enabled(on) {
     if (root.service && typeof root.service.setFido2Enabled === "function") root.service.setFido2Enabled(on)
@@ -573,12 +1043,17 @@ Item {
     return name.length > 0 ? name.charAt(0).toUpperCase() : "?"
   }
 
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
+  readonly property color background: Commons.Color.menu.background
+  readonly property color foreground: Commons.Color.menu.text
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.6)
-  readonly property color accent: Color.accent
-  readonly property color scrim: Color.menu.scrim
-  readonly property var borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+  readonly property color accent: Commons.Color.accent
+  readonly property color scrim: Commons.Color.menu.scrim
+  // Errors and the delete confirm take the theme's urgent color. Badges and
+  // dimmers over thumbnails are the theme background at an alpha, so their
+  // foreground text stays readable on light themes too.
+  readonly property color danger: Commons.Color.urgent
+  function shade(alpha) { return Qt.rgba(Commons.Color.background.r, Commons.Color.background.g, Commons.Color.background.b, alpha) }
+  readonly property var borderSpec: Border.surfaceSpec("menu", "border", Commons.Color.menu.border, Math.max(1, Style.space(2)))
   // Redesign visual language: sharp corners, everforest-style typography.
   // Colors still follow the Omarchy theme.
   readonly property int cornerRadius: 0
@@ -596,7 +1071,7 @@ Item {
     if (bootSetting.indexOf("snapshot:") === 0) return bootSetting
     if (bootSetting.indexOf("custom:") === 0 || bootSetting.indexOf("video:") === 0) return bootSetting
     if (bootSetting === "follow") {
-      var d = Designs.byId(activeDesignId)
+      var d = Designs.byId(activeDesignId, root.userDesigns)
       return d && d.boot === true ? d.id : "snapshot:" + activeDesignId
     }
     return bootSetting
@@ -604,15 +1079,15 @@ Item {
   readonly property bool bootDirty: !bootApplying && bootWouldApply !== bootAppliedId
   readonly property string bootDesiredName: {
     var w = bootWouldApply
-    if (w === "stock") return "Untouched"
-    if (w === "theme") return "Theme colors"
+    if (w === "stock") return root.tr("Untouched")
+    if (w === "theme") return root.tr("Theme colors")
     if (w.indexOf("snapshot:") === 0) {
-      var sd = Designs.byId(w.substring(9))
-      return (sd ? sd.name : w.substring(9)) + " (snapshot)"
+      var sd = Designs.byId(w.substring(9), root.userDesigns)
+      return root.tr("%1 (snapshot)").arg(sd ? sd.name : w.substring(9))
     }
     if (w.indexOf("custom:") === 0) return w.substring(7)
     if (w.indexOf("video:") === 0) return w.substring(6).replace(/\.[^.]+$/, "")
-    var d = Designs.byId(w)
+    var d = Designs.byId(w, root.userDesigns)
     return d ? d.name : w
   }
 
@@ -656,11 +1131,29 @@ Item {
       Qt.callLater(function() { designerView.focusCanvas() })
       return
     }
-    root.mainTab = root.requestedTab.length > 0 ? root.requestedTab : "styling"
-    root.requestedTab = ""
+    var asked = root.requestedView === "panel" || root.requestedView === "full" ? root.requestedView
+      : (root.everOpened ? root.view : root.openAs)
+    // A tab asked for by name is a page of the full explorer.
+    if (root.requestedTab.length > 0) asked = "full"
+    root.requestedView = ""
+    root.everOpened = true
+    root.view = asked
     root.category = "all"
-    var idx = Designs.indexOf(root.activeDesignId)
-    root.selectedIndex = idx >= 0 ? idx : 0
+    if (root.sideView) {
+      // On the design in use, under Favorites when it is starred: those are
+      // the ones switched between.
+      var active = Designs.byId(root.activeDesignId, root.userDesigns)
+      root.mainTab = root.isFavorite(root.activeDesignId) ? "favorites"
+        : (active && Designs.isAnimated(active) ? "animation" : "styling")
+      if (!root.selectById(root.activeDesignId)) root.selectedIndex = 0
+      root.tourStep = root.tourSeen ? -1 : 0
+    } else {
+      root.tourStep = -1
+      root.mainTab = root.requestedTab.length > 0 ? root.requestedTab : "styling"
+      var idx = Designs.indexOf(root.activeDesignId, root.userDesigns)
+      root.selectedIndex = idx >= 0 ? idx : 0
+    }
+    root.requestedTab = ""
     if (root.service) {
       if (typeof root.service.rescanUserDesigns === "function") root.service.rescanUserDesigns()
       if (typeof root.service.refreshBackground === "function") root.service.refreshBackground()
@@ -685,6 +1178,9 @@ Item {
   function dismiss() {
     root.opened = false
     root.fullPreview = false
+    root.showingKeys = false
+    root.searchText = ""
+    root.searching = false
     if (root.designerPaused) {
       if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
       return
@@ -703,6 +1199,7 @@ Item {
   }
 
   function positionAtSelected(mode) {
+    if (root.sideView) { sidePanel.reveal(); return }
     grid.positionViewAtIndex(root.selectedIndex, mode)
     var minY = grid.originY - grid.topMargin
     var maxY = Math.max(minY, grid.originY + grid.contentHeight - grid.height + grid.bottomMargin)
@@ -719,18 +1216,11 @@ Item {
     if (id === root.category) return
     var current = root.selectedDesign ? root.selectedDesign.id : ""
     root.category = id
-    var list = Designs.inCategory(id)
+    var list = Designs.inCategory(id, root.userDesigns)
     var keep = -1
     for (var i = 0; i < list.length; i++) if (list[i].id === current) keep = i
     root.selectedIndex = keep >= 0 ? keep : 0
     reveal(GridView.Contain)
-  }
-
-  function cycleCategory(delta) {
-    var n = categories.length
-    var cur = 0
-    for (var i = 0; i < n; i++) if (categories[i].id === root.category) cur = i
-    setCategory(categories[(cur + delta + n) % n].id)
   }
 
   function move(delta) {
@@ -811,6 +1301,91 @@ Item {
     root.service.setBlankDelay(ms)
   }
 
+  // How long the field stays inert after a key has woken the display, so the
+  // keys that lit the panel stay out of the password.
+  // Sleep, restart and shut down on the lock screen. Off by default: with it
+  // on, anyone at the machine can restart it without the password.
+  readonly property bool mediaControls: service && service.mediaControls === true
+  function setMediaControls(on) {
+    if (!root.service || typeof root.service.setMediaControls !== "function") return
+    root.service.setMediaControls(on)
+  }
+
+  function setPowerActions(on) {
+    if (!root.service || typeof root.service.setPowerActions !== "function") return
+    root.service.setPowerActions(on)
+  }
+
+  function setWallpaperBlur(id) {
+    if (!root.service || typeof root.service.setWallpaperBlur !== "function") return
+    root.service.setWallpaperBlur(id)
+  }
+
+  function setReduceMotion(id) {
+    if (!root.service || typeof root.service.setReduceMotion !== "function") return
+    root.service.setReduceMotion(id)
+  }
+
+  function setLanguage(id) {
+    if (!root.service || typeof root.service.setLanguage !== "function") return
+    root.service.setLanguage(id)
+  }
+
+  function setUiScale(id) {
+    if (!root.service || typeof root.service.setUiScale !== "function") return
+    root.service.setUiScale(id)
+  }
+
+  function setWallpaperDim(id) {
+    if (!root.service || typeof root.service.setWallpaperDim !== "function") return
+    root.service.setWallpaperDim(id)
+  }
+
+  function setAwayReport(on) {
+    if (!root.service || typeof root.service.setAwayReport !== "function") return
+    root.service.setAwayReport(on)
+  }
+
+  function setFollowTheme(on) {
+    if (!root.service || typeof root.service.setFollowTheme !== "function") return
+    root.service.setFollowTheme(on)
+  }
+
+  function setRotateDesigns(id) {
+    if (!root.service || typeof root.service.setRotateDesigns !== "function") return
+    root.service.setRotateDesigns(id)
+  }
+
+  function setOwnerMessage(text) {
+    if (!root.service || typeof root.service.setOwnerMessage !== "function") return
+    root.service.setOwnerMessage(text)
+  }
+
+  function setLockOnKeyRemoval(on) {
+    if (!root.service || typeof root.service.setLockOnKeyRemoval !== "function") return
+    root.service.setLockOnKeyRemoval(on)
+  }
+
+  function setWakeOnKeyInsert(on) {
+    if (!root.service || typeof root.service.setWakeOnKeyInsert !== "function") return
+    root.service.setWakeOnKeyInsert(on)
+  }
+
+  function setFingerprintInDark(on) {
+    if (!root.service || typeof root.service.setFingerprintInDark !== "function") return
+    root.service.setFingerprintInDark(on)
+  }
+
+  function setWakeGrace(ms) {
+    if (!root.service || typeof root.service.setWakeGrace !== "function") return
+    root.service.setWakeGrace(ms)
+  }
+
+  function setFaceStart(value) {
+    if (!root.service || typeof root.service.setFaceStart !== "function") return
+    root.service.setFaceStart(value)
+  }
+
   function beginCustomDelay() {
     root.customDelayText = root.keepDisplayOn ? "" : String(Math.max(1, Math.round(root.blankDelay / 60000)))
     root.customDelayEditing = true
@@ -830,10 +1405,12 @@ Item {
     keyCatcher.forceActiveFocus()
   }
 
-  function customizeSelected() {
+  // A stock design opens the copy you made of it before; `fresh` (Shift+C)
+  // makes another one.
+  function customizeSelected(fresh) {
     if (!root.selectedDesign || !root.service) return
     if (root.selectedDesign.path) { editSelected(); return }
-    root.service.customizeDesign(root.selectedDesign.id)
+    root.service.customizeDesign(root.selectedDesign.id, fresh === true)
   }
 
   // A design of your own opens where it was made: the designer for a layout,
@@ -913,7 +1490,15 @@ Item {
     root.dismiss()
   }
 
+  // ExplorerHost.qml hands over the requests that came before this explorer
+  // was built, by the name of the handler below.
+  function replayServiceEvent(handler, args) {
+    if (handler.indexOf("on") === 0 && typeof serviceEvents[handler] === "function")
+      serviceEvents[handler].apply(serviceEvents, args)
+  }
+
   Connections {
+    id: serviceEvents
     target: root.service
     ignoreUnknownSignals: true
     function onBootDesignLoaded(name, content) {
@@ -926,7 +1511,7 @@ Item {
       root.setCategory("custom")
       Qt.callLater(function() {
         root.selectById(id)
-        var d = Designs.byId(id)
+        var d = Designs.byId(id, root.userDesigns)
         if (d) root.openEditor(d)
       })
     }
@@ -934,7 +1519,7 @@ Item {
       if (!root.opened) return
       Qt.callLater(function() {
         root.selectById(id)
-        var d = Designs.byId(id)
+        var d = Designs.byId(id, root.userDesigns)
         if (d) root.openDesigner(d)
       })
     }
@@ -950,11 +1535,15 @@ Item {
         root.bootEditBusy = false
     }
     function onExploreTabRequested(tab) {
-      if (tab !== "styling" && tab !== "animation" && tab !== "boot" && tab !== "settings") return
+      if (tab !== "styling" && tab !== "animation" && tab !== "seasonal" && tab !== "favorites" && tab !== "boot" && tab !== "settings") return
       // summon() re-runs open() even when already open, and open() resets the
       // tab — stash the request so it survives either path.
       root.requestedTab = tab
       if (root.opened) root.mainTab = tab
+    }
+    // Which of the two `omarchy-shell lock explore` wants; open() runs next.
+    function onExploreViewRequested(view) {
+      root.requestedView = view
     }
     // Theme changed under an applied snapshot: retake it under the new theme.
     function onBootResnapshotRequested(designId, persist) {
@@ -963,11 +1552,12 @@ Item {
     }
   }
 
-  function useDesign(id, dismissAfter) {
-    if (!Designs.byId(String(id)) || selectDesignProc.running) return
+  function useDesign(id, dismissAfter, everywhere) {
+    if (!Designs.byId(String(id), root.userDesigns) || selectDesignProc.running) return
     root.selectionError = ""
+    var how = everywhere && root.followTheme ? "all" : undefined
     if (root.service && typeof root.service.setDesign === "function") {
-      if (root.service.setDesign(id)) {
+      if (root.service.setDesign(id, how)) {
         if (dismissAfter) root.dismiss()
       } else root.selectionError = "Could not select this lock design"
       return
@@ -975,7 +1565,7 @@ Item {
     // The authentication service is intentionally private in Omarchy 4.0.3.
     // Use its existing settings command, never expose the PAM service to UI.
     selectDesignProc.dismissAfter = dismissAfter
-    selectDesignProc.command = ["omarchy-shell", "lock", "setDesign", String(id)]
+    selectDesignProc.command = Bounded.run(["omarchy-shell", "lock", how === "all" ? "setDesignForAll" : "setDesign", String(id)], { deadline: 15, cap: 65536 })
     selectDesignProc.running = true
   }
 
@@ -991,8 +1581,65 @@ Item {
     }
   }
 
-  function apply() {
-    if (selectedDesign) root.useDesign(selectedDesign.id, true)
+  function apply(everywhere) {
+    if (selectedDesign) root.useDesign(selectedDesign.id, true, everywhere)
+  }
+
+  // Dedicated render surface for background snapshots. grabToImage needs a
+  // rendered frame, which the explorer panel only has while open — so a
+  // theme/wallpaper change with a closed explorer always hit the deferred
+  // path and the boot image went stale. This window exists only for the
+  // duration of a snapshot flow and shows nothing: its content is parked
+  // off-screen, it takes no focus, and it reserves no screen space.
+  PanelWindow {
+    id: snapshotWindow
+    visible: root.snapshotBusy
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    WlrLayershell.namespace: "omarchy-lock-explorer-snapshot"
+    WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+    exclusionMode: ExclusionMode.Ignore
+    // Click-through: it is mapped full-screen on the overlay layer for a second
+    // or two per snapshot, and must not swallow clicks meant for the explorer.
+    mask: Region {}
+
+    // Off-screen full-resolution render used to snapshot a lock design into a
+    // boot background. Parked far outside the window so it never shows.
+    Item {
+      id: snapshotSource
+      // Parked relative to its own width: the item is as wide as the display
+      // now, so a fixed offset would let a very wide one back onto the screen.
+      x: -width - 200; y: -height - 200
+      width: root.snapshotWidth; height: root.snapshotHeight
+      LockHost {
+        id: snapshotHost
+        anchors.fill: parent
+        designId: root.activeDesignId
+        revision: root.service ? root.service.designsRevision : 0
+        userDesigns: root.userDesigns
+        twelveHour: root.twelveHour
+        wallpaperBlur: root.wallpaperBlurValue
+        wallpaperDim: root.wallpaperDimShift
+        uiScale: root.uiScale
+        holdStill: root.motionReduced
+        language: root.lockLanguage
+        fullName: root.accountName
+        showLayoutBadge: root.showLayoutBadge
+        showCapsBadge: root.showCapsBadge
+        allowPasswordToggle: root.allowPasswordToggle
+        showAuthIcons: root.showAuthIcons
+        backgroundPath: root.service ? root.service.backgroundPath : ""
+        backgroundVersion: root.service ? root.service.backgroundVersion : 0
+        avatarPath: root.service ? root.service.avatarPath : ""
+        avatarVersion: root.service ? root.service.avatarVersion : 0
+        inputEnabled: false
+        loadBackground: root.opened || root.snapshotBusy
+        passwordText: ""
+        videoPath: root.service ? root.service.videoPath : ""
+        videoPlaying: false
+      }
+    }
   }
 
   PanelWindow {
@@ -1005,37 +1652,8 @@ Item {
     WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
     exclusionMode: ExclusionMode.Ignore
 
-    // Off-screen full-resolution render used to snapshot a lock design into a
-    // boot background. Parked far outside the panel so it never shows.
-    Item {
-      id: snapshotSource
-      // Parked relative to its own width: the item is as wide as the display
-      // now, so a fixed offset would let a very wide one back onto the screen.
-      x: -width - 200; y: -height - 200
-      width: root.snapshotWidth; height: root.snapshotHeight
-      Loader {
-        anchors.fill: parent
-        active: root.snapshotBusy
-        sourceComponent: LockHost {
-          id: snapshotHost
-          anchors.fill: parent
-          designId: root.activeDesignId
-          revision: root.service ? root.service.designsRevision : 0
-          twelveHour: root.twelveHour
-          backgroundPath: root.service ? root.service.backgroundPath : ""
-          backgroundVersion: root.service ? root.service.backgroundVersion : 0
-          avatarPath: root.service ? root.service.avatarPath : ""
-          avatarVersion: root.service ? root.service.avatarVersion : 0
-          inputEnabled: false
-          loadBackground: root.opened || root.snapshotBusy
-          passwordText: ""
-          videoPath: root.service ? root.service.videoPath : ""
-          videoPlaying: false
-        }
-      }
-    }
-
-    Rectangle { anchors.fill: parent; color: root.scrim }
+    // The side panel leaves the desktop as it is; the full explorer dims it.
+    Rectangle { anchors.fill: parent; color: root.scrim; visible: !root.sideView || root.fullPreview }
     MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
 
     Item {
@@ -1045,10 +1663,17 @@ Item {
       Keys.priority: Keys.BeforeItem
       // Embedded lock previews can pull keyboard focus; reclaim it whenever
       // it drifts, except while a real editor field wants it.
+      function mayReclaim() {
+        return root.opened && root.bootEditing.length === 0 && !root.editing && !root.designing
+            && !root.customDelayEditing && !root.ownerEditing && !root.searching
+      }
       onActiveFocusChanged: {
-        if (!activeFocus && root.opened && root.bootEditing.length === 0 && !root.editing
-            && !root.designing && !root.customDelayEditing)
-          Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+        if (!activeFocus && mayReclaim())
+          Qt.callLater(function() {
+            // Asked again: a click into a field (the search, the owner
+            // message) moves focus there before the field has said so.
+            if (!keyCatcher.activeFocus && keyCatcher.mayReclaim()) keyCatcher.forceActiveFocus()
+          })
       }
       Keys.onPressed: function(event) {
         if (event.key === Qt.Key_Escape) { root.handleEscape(); event.accepted = true; return }
@@ -1056,17 +1681,50 @@ Item {
         if (root.editing) return
         if (root.bootEditing.length > 0) return
         if (root.customDelayEditing) return
-        if (root.mainTab !== "styling" && root.mainTab !== "animation") {
+        if (root.sideView) { root.sideKey(event); return }
+        // event.text as well, since ? sits on a different key per layout.
+        var question = event.key === Qt.Key_Question || event.text === "?"
+        if (root.showingKeys) {
+          if (question) root.showingKeys = false
+          event.accepted = true
+          return
+        }
+        if (question) { root.showingKeys = true; event.accepted = true; return }
+        if (root.gridTab && (event.text === "/" || (event.key === Qt.Key_F && (event.modifiers & Qt.ControlModifier)))) {
+          root.fullPreview = false
+          root.focusSearch()
+          event.accepted = true
+          return
+        }
+        // The settings pages scroll from the keyboard as well as the wheel.
+        if (!root.gridTab && root.mainTab === "settings") {
+          var page = settingsFlick.height * 0.85
+          var bottom = Math.max(0, settingsFlick.contentHeight - settingsFlick.height)
+          var y = settingsFlick.contentY
+          if (event.key === Qt.Key_Down || event.key === Qt.Key_J) y += Style.space(60)
+          else if (event.key === Qt.Key_Up || event.key === Qt.Key_K) y -= Style.space(60)
+          else if (event.key === Qt.Key_PageDown || event.key === Qt.Key_Space) y += page
+          else if (event.key === Qt.Key_PageUp) y -= page
+          else if (event.key === Qt.Key_Home) y = 0
+          else if (event.key === Qt.Key_End) y = bottom
+          else y = -1
+          if (y !== -1) {
+            settingsFlick.contentY = Math.max(0, Math.min(bottom, y))
+            event.accepted = true
+            return
+          }
+        }
+        if (!root.gridTab) {
           if (event.key === Qt.Key_U) { root.toggleSettings("settings"); event.accepted = true }
           else if (event.key === Qt.Key_B) { root.toggleSettings("boot"); event.accepted = true }
           return
         }
         if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-          root.apply(); event.accepted = true
+          root.apply(root.followTheme && (event.modifiers & Qt.ShiftModifier) !== 0); event.accepted = true
         } else if (event.key === Qt.Key_Space || event.key === Qt.Key_P) {
           root.fullPreview = !root.fullPreview; event.accepted = true
         } else if (event.key === Qt.Key_C) {
-          root.customizeSelected(); event.accepted = true
+          root.customizeSelected((event.modifiers & Qt.ShiftModifier) !== 0); event.accepted = true
         } else if (event.key === Qt.Key_E) {
           if (root.selectedDesign && root.selectedDesign.path) root.editSelected()
           else root.customizeSelected()
@@ -1097,10 +1755,19 @@ Item {
         } else if (event.key === Qt.Key_B) {
           root.toggleSettings("boot")
           event.accepted = true
-        } else if (event.key === Qt.Key_Tab) {
-          root.cycleCategory(1); event.accepted = true
-        } else if (event.key === Qt.Key_Backtab) {
-          root.cycleCategory(-1); event.accepted = true
+        } else if (event.key === Qt.Key_O) {
+          root.showPanel()
+          event.accepted = true
+        } else if (event.key === Qt.Key_F) {
+          if (root.selectedDesign && root.service && typeof root.service.toggleFavorite === "function")
+            root.service.toggleFavorite(root.selectedDesign.id)
+          event.accepted = true
+        } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+          // Through the grid entries in the sidebar, as if clicking the next.
+          var tabs = ["styling", "animation", "seasonal", "favorites"]
+          var step = event.key === Qt.Key_Backtab ? tabs.length - 1 : 1
+          root.mainTab = tabs[(Math.max(0, tabs.indexOf(root.mainTab)) + step) % tabs.length]
+          event.accepted = true
         } else if (event.key === Qt.Key_Left || event.key === Qt.Key_H) {
           root.move(-1); event.accepted = true
         } else if (event.key === Qt.Key_Right || event.key === Qt.Key_L) {
@@ -1125,7 +1792,7 @@ Item {
 
     BorderSurface {
       id: card
-      visible: !root.fullPreview && !root.editing
+      visible: !root.fullPreview && !root.editing && !root.sideView
       width: root.cardWidth
       height: root.cardHeight
       radius: root.cornerRadius
@@ -1161,7 +1828,7 @@ Item {
               font.weight: Font.Bold
             }
             Text {
-              text: "LOCK SCREEN EXPLORER"
+              text: root.tr("LOCK SCREEN EXPLORER")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
@@ -1171,15 +1838,24 @@ Item {
           }
           Text {
             text: {
-              if (root.wallpaperBroken) return "Wallpaper failed to load" + (root.wallpaperIsWebp ? " — WebP needs:  sudo pacman -S qt6-imageformats  (then omarchy restart shell)" : "")
-              if (root.mainTab === "settings") return "Unlock transition, avatar and sign-in monitor"
-              if (root.mainTab === "boot") return "The disk-passphrase screen at first boot · experimental — a broken theme falls back to a plain text prompt"
-              if (root.mainTab === "animation") return Designs.animations().length + " animated lock screens"
-              if (root.mainTab === "editor") return root.bootEditing.length > 0 ? "Editing " + root.bootEditing : "Make a matching lock screen and boot screen"
-              return (root.mainTab === "styling" ? Designs.stylings().length + " lock screen stylings · " : "") + root.currentThemeName + " · follows your theme"
+              if (root.wallpaperBroken) return root.tr("Wallpaper failed to load")
+                + (root.wallpaperIsWebp ? " — " + root.tr("WebP needs %1, then %2").arg("sudo pacman -S qt6-imageformats").arg("omarchy restart shell") : "")
+              if (root.mainTab === "settings") return root.tr("How the lock screen looks, unlocks and looks after itself")
+              if (root.mainTab === "boot") return root.tr("The disk-passphrase screen at first boot") + " · " + root.tr("A broken theme falls back to a plain text prompt")
+              if (root.mainTab === "animation" && root.multimediaMissing)
+                return root.tr("Video designs need qt6-multimedia") + " · " + root.tr("Settings (U) installs it")
+              if (root.gridTab && root.searchText.trim().length > 0)
+                return (root.designs.length === 1 ? root.tr("1 design matches “%1”").arg(root.searchText.trim())
+                                                  : root.tr("%1 designs match “%2”").arg(root.designs.length).arg(root.searchText.trim()))
+                  + " · " + root.tr("Esc clears")
+              if (root.mainTab === "favorites") return root.tr("%1 starred with F").arg(root.designs.length)
+              if (root.mainTab === "animation") return root.tr("%1 animated lock screens").arg(Designs.animations(root.userDesigns).length)
+              if (root.mainTab === "seasonal") return root.tr("%1 seasonal lock screens").arg(Designs.seasonal(root.userDesigns).length) + " · " + root.tr("In their own colors")
+              if (root.mainTab === "editor") return root.bootEditing.length > 0 ? root.tr("Editing %1").arg(root.bootEditing) : root.tr("Make a matching lock screen and boot screen")
+              return (root.mainTab === "styling" ? root.tr("%1 lock screen stylings").arg(Designs.stylings(root.userDesigns).length) + " · " : "") + root.currentThemeName + " · " + root.tr("Follows your theme")
             }
             textFormat: Text.PlainText
-            color: root.wallpaperBroken ? "#c96a6a" : root.muted
+            color: root.wallpaperBroken ? root.danger : root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
@@ -1190,6 +1866,110 @@ Item {
           anchors.right: parent.right
           anchors.top: parent.top
           spacing: Style.space(8)
+
+          // Search over every design. The grid keys stay the grid's: the
+          // field only takes the keyboard while it has focus (/ or a click),
+          // and Enter, Down or Esc hands it back.
+          Rectangle {
+            id: searchBox
+            visible: root.gridTab
+            height: Style.space(28)
+            width: Style.space(220)
+            radius: root.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, root.searching ? 0.12 : 0.07)
+            border.width: 1
+            border.color: root.searching ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+
+            TypedInput {
+              id: searchInput
+              anchors.left: parent.left
+              anchors.right: searchHint.left
+              anchors.leftMargin: Style.space(10)
+              anchors.rightMargin: Style.space(6)
+              anchors.verticalCenter: parent.verticalCenter
+              clip: true
+              text: root.searchText
+              color: root.foreground
+              selectionColor: root.accent
+              selectedTextColor: Commons.Color.background
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              onTextEdited: root.searchText = text
+              onActiveFocusChanged: root.searching = activeFocus
+              Keys.onPressed: function(event) {
+                if (event.key === Qt.Key_Escape) {
+                  if (root.searchText.length > 0) root.searchText = ""
+                  else root.leaveSearch()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                           || event.key === Qt.Key_Down || event.key === Qt.Key_Tab) {
+                  root.leaveSearch()
+                  event.accepted = true
+                }
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.searchText.length === 0
+                text: root.tr("Search designs")
+                color: root.muted
+                font: searchInput.font
+              }
+            }
+
+            Text {
+              id: searchHint
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(10)
+              anchors.verticalCenter: parent.verticalCenter
+              text: root.searchText.length > 0 ? "✕" : "/"
+              color: searchClear.containsMouse ? root.foreground : root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              MouseArea {
+                id: searchClear
+                anchors.fill: parent
+                anchors.margins: -Style.space(4)
+                hoverEnabled: true
+                onClicked: { if (root.searchText.length > 0) root.searchText = ""; else root.focusSearch() }
+              }
+            }
+
+            MouseArea {
+              anchors.fill: parent
+              anchors.rightMargin: searchHint.width + Style.space(14)
+              z: -1
+              onClicked: root.focusSearch()
+            }
+          }
+
+          // Back to the side panel, on the design selected here.
+          Rectangle {
+            visible: root.gridTab
+            height: Style.space(28)
+            width: sidePanelLabel.implicitWidth + Style.space(20)
+            radius: root.cornerRadius
+            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, sidePanelArea.containsMouse ? 0.14 : 0.07)
+            border.width: 1
+            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+            Behavior on color { ColorAnimation { duration: 100 } }
+            Text {
+              id: sidePanelLabel
+              anchors.centerIn: parent
+              text: root.tr("Side panel") + " · O"
+              textFormat: Text.PlainText
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+            MouseArea {
+              id: sidePanelArea
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.showPanel()
+            }
+          }
 
           // Avatar button: click to pick a picture with the normal file
           // dialog, the x clears it back to the user's initial.
@@ -1215,13 +1995,13 @@ Item {
                 initial: root.userInitial
                 fontSize: Style.font.caption
                 fillColor: root.accent
-                textColor: Color.background
+                textColor: Commons.Color.background
                 shadow: false
               }
 
               Text {
                 anchors.verticalCenter: parent.verticalCenter
-                text: root.hasAvatar ? "Avatar" : "Add avatar"
+                text: root.tr(root.hasAvatar ? "Avatar" : "Add avatar")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1261,7 +2041,7 @@ Item {
             Text {
               id: activeLabel
               anchors.centerIn: parent
-              text: root.selectionError || "Active: " + (Designs.byId(root.activeDesignId) ? Designs.byId(root.activeDesignId).name : root.activeDesignId)
+              text: root.selectionError || root.tr("Active: %1").arg(Designs.byId(root.activeDesignId, root.userDesigns) ? Designs.byId(root.activeDesignId, root.userDesigns).name : root.activeDesignId)
               textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
@@ -1296,9 +2076,9 @@ Item {
               Text {
                 id: chipLabel
                 anchors.centerIn: parent
-                text: chip.modelData.name
+                text: root.tr(chip.modelData.name)
                 textFormat: Text.PlainText
-                color: chip.current ? Color.background : root.foreground
+                color: chip.current ? Commons.Color.background : root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.weight: chip.current ? Font.DemiBold : Font.Normal
@@ -1316,7 +2096,7 @@ Item {
         // The two settings pages live where the grid otherwise is.
         Item {
           id: settingsPane
-          visible: root.mainTab !== "styling" && root.mainTab !== "animation"
+          visible: !root.gridTab
           anchors.top: parent.bottom
           anchors.topMargin: Style.space(6)
           anchors.left: parent.left
@@ -1325,9 +2105,10 @@ Item {
           anchors.rightMargin: root.mainTab === "editor" ? Style.space(40) : root.rightPanelW + Style.space(40)
           // Sized against the card (footer is not a sibling, so no anchor),
           // clipped and scrollable so tall content never draws over the nav.
-          height: card.height - root.headerHeight - root.footerHeight - Style.space(44)
+          height: card.height - root.headerHeight - root.footerHeight - Style.space(80)
 
           Flickable {
+            id: settingsFlick
             anchors.fill: parent
             clip: true
             contentWidth: width
@@ -1341,483 +2122,697 @@ Item {
             spacing: Style.space(14)
 
             Column {
-              width: parent.width
+              width: Math.min(parent.width, Style.space(900))
               visible: root.mainTab === "settings"
-              spacing: Style.space(10)
+              spacing: Style.space(18)
 
-              DisplayPowerSettings {
-                width: parent.width
-                visible: root.service && root.service.displayPowerEnabled
-                settings: root.service ? root.service.displayPowerSettings : ({})
-                onSettingEdited: function(field, value) {
-                  if (root.service) root.service.setDisplayPowerSetting(field, value)
-                }
-              }
+              // Health: only when something is missing, with the fix a click
+              // away. The full check is extras/doctor.sh, under System.
+              SettingSection {
+                explorer: root
+                visible: root.healthIssues.length > 0
+                title: root.tr("Health")
+                description: root.tr("Something here keeps part of the plugin from working.")
 
-              Column {
-                spacing: Style.space(2)
-                Repeater {
-                  model: root.unlockOptions
-                  Rectangle {
-                    id: unlockOptionRow
-                    required property var modelData
-                    readonly property bool current: modelData.id === root.unlockAnimation
-                    width: Style.space(400)
-                    height: Style.space(42)
-                    radius: root.cornerRadius
-                    color: current ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.14)
-                                   : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, unlockOptionArea.containsMouse ? 0.07 : 0.0)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                Column {
+                  width: parent.width
+                  spacing: Style.space(8)
 
+                  Repeater {
+                    model: root.healthIssues
                     Rectangle {
-                      id: unlockOptionRadio
-                      anchors.verticalCenter: parent.verticalCenter
-                      anchors.left: parent.left
-                      anchors.leftMargin: Style.space(10)
-                      width: Style.space(16)
-                      height: Style.space(16)
-                      radius: width / 2
-                      color: "transparent"
-                      border.width: Math.max(1, Style.space(2))
-                      border.color: unlockOptionRow.current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
-
-                      Rectangle {
-                        anchors.centerIn: parent
-                        width: Style.space(8)
-                        height: Style.space(8)
-                        radius: width / 2
-                        color: root.accent
-                        visible: unlockOptionRow.current
-                      }
-                    }
-
-                    Column {
-                      anchors.verticalCenter: parent.verticalCenter
-                      anchors.left: unlockOptionRadio.right
-                      anchors.leftMargin: Style.space(10)
-                      spacing: 1
+                      id: issueRow
+                      required property var modelData
+                      width: parent.width
+                      height: issueLine.implicitHeight + Style.space(22)
+                      radius: root.cornerRadius
+                      color: Qt.rgba(root.danger.r, root.danger.g, root.danger.b, 0.12)
+                      border.width: 1
+                      border.color: Qt.rgba(root.danger.r, root.danger.g, root.danger.b, 0.45)
 
                       Text {
-                        text: unlockOptionRow.modelData.name
+                        id: issueLine
+                        anchors.left: parent.left
+                        anchors.right: installButton.visible ? installButton.left : parent.right
+                        anchors.leftMargin: Style.space(14)
+                        anchors.rightMargin: Style.space(14)
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: issueRow.modelData.text
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
-                        font.weight: unlockOptionRow.current ? Font.DemiBold : Font.Normal
                       }
 
-                      Text {
-                        text: unlockOptionRow.modelData.hint
-                        color: root.muted
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.caption
+                      Rectangle {
+                        id: installButton
+                        visible: issueRow.modelData.packages.length > 0 || !!issueRow.modelData.fix
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(10)
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: installLabel.implicitWidth + Style.space(26)
+                        height: Style.space(34)
+                        radius: root.cornerRadius
+                        color: installArea.containsMouse ? Qt.lighter(root.accent, 1.15) : root.accent
+                        Text {
+                          id: installLabel
+                          anchors.centerIn: parent
+                          text: issueRow.modelData.fix === "copies" ? root.tr(root.movingCopies ? "Moving…" : "Move it out") : root.tr("Install")
+                          color: Commons.Color.background
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.bodySmall
+                          font.weight: Font.DemiBold
+                        }
+                        MouseArea {
+                          id: installArea
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: {
+                            if (issueRow.modelData.fix === "copies") root.moveCopies()
+                            else root.installPackages(issueRow.modelData.packages)
+                          }
+                        }
                       }
-                    }
-
-                    MouseArea {
-                      id: unlockOptionArea
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      onClicked: root.setUnlock(unlockOptionRow.modelData.id)
                     }
                   }
                 }
               }
 
-              Row {
-                visible: root.unlockAnimation !== "none"
-                spacing: Style.space(6)
+              SettingSection {
+                explorer: root
+                title: root.tr("Unlock")
+                description: root.tr("What happens once the password is right.")
 
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Length"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
+                // The animation the lock screen leaves with.
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Animation")
+                  help: root.motionReduced
+                        ? root.tr("Reduce motion is on, so the lock screen leaves at once and no unlock clip plays.")
+                        : (root.unlockAnimation === "none" ? "" : root.tr("The lock screen stays up while it plays."))
 
-                Repeater {
-                  model: root.unlockDurations
-                  Rectangle {
-                    id: speed
-                    required property int modelData
-                    readonly property bool current: modelData === root.unlockDuration
-                    width: speedLabel.implicitWidth + Style.space(18)
-                    height: Style.space(26)
-                    radius: root.cornerRadius
-                    color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, speedArea.containsMouse ? 0.12 : 0.06)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                  Column {
+                    width: parent.width
+                    spacing: Style.space(2)
+                    Repeater {
+                      model: root.unlockOptions
+                      Rectangle {
+                        id: unlockOptionRow
+                        required property var modelData
+                        readonly property bool current: modelData.id === root.unlockAnimation
+                        width: Math.min(parent.width, Style.space(460))
+                        height: Style.space(50)
+                        radius: root.cornerRadius
+                        color: current ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.14)
+                                       : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, unlockOptionArea.containsMouse ? 0.07 : 0.0)
+                        Behavior on color { ColorAnimation { duration: 100 } }
 
-                    Text {
-                      id: speedLabel
-                      anchors.centerIn: parent
-                      text: (speed.modelData / 1000).toFixed(1) + "s"
-                      color: speed.current ? Color.background : root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.weight: speed.current ? Font.DemiBold : Font.Normal
-                    }
+                        Rectangle {
+                          id: unlockOptionRadio
+                          anchors.verticalCenter: parent.verticalCenter
+                          anchors.left: parent.left
+                          anchors.leftMargin: Style.space(12)
+                          width: Style.space(18)
+                          height: Style.space(18)
+                          radius: width / 2
+                          color: "transparent"
+                          border.width: Math.max(1, Style.space(2))
+                          border.color: unlockOptionRow.current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
 
-                    MouseArea {
-                      id: speedArea
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      onClicked: root.setUnlockDuration(speed.modelData)
+                          Rectangle {
+                            anchors.centerIn: parent
+                            width: Style.space(9)
+                            height: Style.space(9)
+                            radius: width / 2
+                            color: root.accent
+                            visible: unlockOptionRow.current
+                          }
+                        }
+
+                        Column {
+                          anchors.verticalCenter: parent.verticalCenter
+                          anchors.left: unlockOptionRadio.right
+                          anchors.leftMargin: Style.space(12)
+                          spacing: 2
+
+                          Text {
+                            text: root.tr(unlockOptionRow.modelData.name)
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.weight: unlockOptionRow.current ? Font.DemiBold : Font.Normal
+                          }
+
+                          Text {
+                            text: root.tr(unlockOptionRow.modelData.hint)
+                            color: root.muted
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                          }
+                        }
+
+                        MouseArea {
+                          id: unlockOptionArea
+                          anchors.fill: parent
+                          hoverEnabled: true
+                          cursorShape: Qt.PointingHandCursor
+                          onClicked: root.setUnlock(unlockOptionRow.modelData.id)
+                        }
+                      }
                     }
                   }
                 }
+
+                SettingRow {
+                  explorer: root
+                  visible: root.unlockAnimation !== "none"
+                  label: root.tr("Length")
+                  options: root.unlockDurations.map(function(ms) { return { id: ms, name: (ms / 1000).toFixed(1) + "s" } })
+                  current: root.unlockDuration
+                  onPicked: function(id) { root.setUnlockDuration(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Clip speed")
+                  help: root.tr("How fast the clip designs and the unlock clip play.")
+                  options: root.clipSpeeds.map(function(v) { return { id: v, name: v + "x" } })
+                  current: {
+                    for (var i = 0; i < root.clipSpeeds.length; i++)
+                      if (Math.abs(root.clipSpeeds[i] - root.clipSpeed) < 0.01) return root.clipSpeeds[i]
+                    return undefined
+                  }
+                  onPicked: function(id) { root.setClipSpeed(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Video ends as wallpaper")
+                  help: root.clipWallpaper
+                        ? root.tr("The desktop opens on the frame the clip stopped on, set with omarchy-theme-bg-set.")
+                        : root.tr("The desktop keeps its own wallpaper after a clip.")
+                  options: root.onOffOptions
+                  current: root.clipWallpaper ? "on" : "off"
+                  onPicked: function(id) { if ((id === "on") !== root.clipWallpaper) root.toggleClipWallpaper() }
+                }
               }
 
-              Text {
-                text: "The lock screen stays up while it plays."
-                color: root.muted
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
+              SettingSection {
+                explorer: root
+                title: root.tr("Look")
+                description: root.tr("How every design is drawn. The preview on the right follows along.")
 
-              // Clip designs land on their own last frame as the wallpaper.
-              Rectangle {
-                width: clipWallRow.implicitWidth + Style.space(8)
-                height: Style.space(30)
-                color: "transparent"
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Clock")
+                  options: root.clockFormats
+                  current: root.twelveHour ? "12" : "24"
+                  onPicked: function(id) { root.setTwelveHour(id === "12") }
+                }
 
-                Row {
-                  id: clipWallRow
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(8)
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Language")
+                  help: root.tr("The language of the lock screen and of this explorer.")
+                  options: root.languageChoices
+                  current: root.languageSetting
+                  onPicked: function(id) { root.setLanguage(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Wallpaper blur")
+                  options: root.wallpaperBlurChoices
+                  current: root.wallpaperBlur
+                  onPicked: function(id) { root.setWallpaperBlur(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Wallpaper dim")
+                  help: root.wallpaperBlur === "design" && root.wallpaperDim === "design"
+                        ? root.tr("Each design blurs and darkens the wallpaper its own way.")
+                        : root.tr("Designs drawn over a solid color or their own art are not affected.")
+                  options: root.wallpaperDimChoices
+                  current: root.wallpaperDim
+                  onPicked: function(id) { root.setWallpaperDim(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Size")
+                  help: root.tr("Draws the whole lock screen larger, so text, field and avatar grow together.")
+                  options: root.uiScaleChoices
+                  current: root.uiScale
+                  onPicked: function(id) { root.setUiScale(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Reduce motion")
+                  help: root.reduceMotion === "off"
+                        ? root.tr("Animated designs move as they were made to.")
+                        : root.tr("Designs hold still, changing only for what you type, a wrong password or the minute.")
+                          + (root.reduceMotion === "battery" ? " " + root.tr(root.motionReduced ? root.tr("On battery now.") : root.tr("Moving now: on mains power.")) : "")
+                  options: root.reduceMotionChoices
+                  current: root.reduceMotion
+                  onPicked: function(id) { root.setReduceMotion(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Design follows the theme")
+                  help: !root.followTheme
+                        ? root.tr("The same design shows whichever theme is active.")
+                        : (root.rotateDesigns !== "off"
+                           ? root.tr("Off while the designs rotate.")
+                           : root.tr("Each theme remembers the design picked while it is active, and a theme change brings it back.")
+                             + " " + root.tr("Enter picks for the theme that is on, Shift+Enter for all of them."))
+                  options: root.onOffOptions
+                  current: root.followTheme ? "on" : "off"
+                  onPicked: function(id) { root.setFollowTheme(id === "on") }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Rotate designs")
+                  help: root.rotateDesigns === "off"
+                        ? root.tr("The same design every time.")
+                        : (root.favoriteIds.length < 2
+                           ? root.tr("Star at least two designs as favorites (F) and they take turns.")
+                           : (root.rotateDesigns === "lock"
+                              ? root.tr("The favorites take turns: the next one each time the screen locks.")
+                              : root.tr("The favorites take turns: a new one each day.")))
+                  options: root.rotateDesignsOptions
+                  current: root.rotateDesigns
+                  onPicked: function(id) { root.setRotateDesigns(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Owner message")
+                  help: root.ownerMessage.length > 0
+                        ? root.tr("Shown in the bottom left corner of every design, for whoever finds the computer.")
+                        : root.tr("Nothing is shown. A line here, such as who to call, sits in the bottom left corner of every design.")
 
                   Rectangle {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(18)
-                    height: Style.space(18)
+                    width: Style.space(440)
+                    height: Style.space(34)
                     radius: root.cornerRadius
-                    color: root.clipWallpaper ? root.accent : "transparent"
+                    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
                     border.width: Math.max(1, Style.space(2))
-                    border.color: root.clipWallpaper ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
+                    border.color: ownerInput.activeFocus ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
 
                     Text {
-                      anchors.centerIn: parent
-                      visible: root.clipWallpaper
-                      text: "✓"
-                      color: Color.background
-                      font.pixelSize: Style.font.caption
-                      font.weight: Font.Bold
-                    }
-                  }
-
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: "Unlock video ends as your wallpaper"
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-
-                MouseArea {
-                  anchors.fill: parent
-                  anchors.margins: -Style.space(4)
-                  onClicked: root.toggleClipWallpaper()
-                }
-              }
-
-              Text {
-                text: "The desktop opens on the frame the clip stopped on, set with omarchy-theme-bg-set."
-                color: root.muted
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              // How long the lock screen stays lit before the display blanks.
-              // Never keeps it powered for the whole lock: video designs keep
-              // playing and slow monitors are never re-blanked mid-wake.
-              Row {
-                visible: !(root.service && root.service.displayPowerEnabled)
-                spacing: Style.space(6)
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Blank the display after"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Repeater {
-                  model: [
-                    { ms: 5000, name: "5s" },
-                    { ms: 15000, name: "15s" },
-                    { ms: 30000, name: "30s" },
-                    { ms: 60000, name: "1m" },
-                    { ms: 300000, name: "5m" },
-                    { ms: -1, name: "Custom" },
-                    { ms: 0, name: "Never" }
-                  ]
-                  Rectangle {
-                    id: blankChip
-                    required property var modelData
-                    readonly property bool current: modelData.ms === 0 ? root.keepDisplayOn
-                                                                       : modelData.ms === -1 ? root.blankDelayIsCustom
-                                                                       : (!root.keepDisplayOn && root.blankDelay === modelData.ms)
-                    width: blankChipLabel.implicitWidth + Style.space(18)
-                    height: Style.space(26)
-                    radius: root.cornerRadius
-                    color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, blankChipArea.containsMouse ? 0.12 : 0.06)
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                    Text {
-                      id: blankChipLabel
-                      anchors.centerIn: parent
-                      text: blankChip.modelData.ms === -1 && root.blankDelayIsCustom
-                            ? "Custom (" + Math.round(root.blankDelay / 60000) + "m)"
-                            : blankChip.modelData.name
-                      color: blankChip.current ? Color.background : root.foreground
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(10)
+                      visible: ownerInput.activeFocus
+                      text: root.tr("Enter saves")
+                      color: root.muted
                       font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.weight: blankChip.current ? Font.DemiBold : Font.Normal
+                      font.pixelSize: Style.font.bodySmall
                     }
 
-                    MouseArea {
-                      id: blankChipArea
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.left: parent.left
+                      anchors.leftMargin: Style.space(10)
+                      visible: ownerInput.text.length === 0 && !ownerInput.activeFocus
+                      text: root.tr("If found, please call …")
+                      color: root.muted
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+
+                    // Enter saves, Escape puts the saved line back. Typing breaks
+                    // the binding to the saved line, so a change from elsewhere
+                    // (the IPC) is copied in by hand.
+                    TypedInput {
+                      id: ownerInput
                       anchors.fill: parent
-                      hoverEnabled: true
-                      onClicked: {
-                        if (blankChip.modelData.ms === -1) root.beginCustomDelay()
-                        else root.setBlankAfter(blankChip.modelData.ms)
+                      anchors.leftMargin: Style.space(10)
+                      anchors.rightMargin: Style.space(100)
+                      verticalAlignment: TextInput.AlignVCenter
+                      clip: true
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      maximumLength: root.ownerMessageMaxLength
+                      text: root.ownerMessage
+                      onActiveFocusChanged: root.ownerEditing = activeFocus
+                      Keys.onEscapePressed: { text = root.ownerMessage; keyCatcher.forceActiveFocus() }
+                      Keys.onReturnPressed: { root.setOwnerMessage(text); keyCatcher.forceActiveFocus() }
+                      Connections {
+                        target: root
+                        function onOwnerMessageChanged() { if (!ownerInput.activeFocus) ownerInput.text = root.ownerMessage }
                       }
                     }
                   }
                 }
+              }
 
-                Rectangle {
-                  visible: root.customDelayEditing
-                  width: Style.space(110)
-                  height: Style.space(26)
-                  radius: root.cornerRadius
-                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
-                  border.width: Math.max(1, Style.space(2))
-                  border.color: root.accent
+              SettingSection {
+                explorer: root
+                title: root.tr("Password field")
+                description: root.tr("What the field shows next to what you type, in the designs that use it.")
 
-                  // The unit hint lives inside the box, right-aligned, and the
-                  // input reserves its width so typed digits never run under it.
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.right: parent.right
-                    anchors.rightMargin: Style.space(8)
-                    text: "m, Enter"
-                    color: root.muted
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                  }
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Keyboard layout")
+                  help: root.tr("The layout code, such as DK or DE, shown when it is not US or when you have more than one. Click it to switch.")
+                  options: root.shownHiddenOptions
+                  current: root.showLayoutBadge ? "show" : "hide"
+                  onPicked: function(id) { root.setFieldItem("layout", id === "show") }
+                }
 
-                  TextInput {
-                    id: customDelayInput
-                    anchors.fill: parent
-                    anchors.leftMargin: Style.space(8)
-                    anchors.rightMargin: Style.space(52)
-                    verticalAlignment: TextInput.AlignVCenter
-                    color: root.foreground
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    text: root.customDelayText
-                    onTextEdited: root.customDelayText = text
-                    focus: root.customDelayEditing
-                    validator: IntValidator { bottom: 1; top: 60 }
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Caps lock warning")
+                  help: root.tr("A CAPS badge while caps lock is on.")
+                  options: root.shownHiddenOptions
+                  current: root.showCapsBadge ? "show" : "hide"
+                  onPicked: function(id) { root.setFieldItem("caps", id === "show") }
+                }
 
-                    Keys.onEscapePressed: {
-                      root.customDelayEditing = false
-                      keyCatcher.forceActiveFocus()
-                    }
-                    Keys.onReturnPressed: root.commitCustomDelay()
-                  }
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Show password button")
+                  help: root.tr("The eye that shows what you typed. Ctrl+E does the same either way.")
+                  options: root.shownHiddenOptions
+                  current: root.allowPasswordToggle ? "show" : "hide"
+                  onPicked: function(id) { root.setFieldItem("reveal", id === "show") }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Sign-in icons")
+                  help: root.tr("The fingerprint, face and security key icons. Without them Tab still switches to the key and Enter on an empty field still starts face unlock.")
+                  options: root.shownHiddenOptions
+                  current: root.showAuthIcons ? "show" : "hide"
+                  onPicked: function(id) { root.setFieldItem("icons", id === "show") }
                 }
               }
 
-              Text {
-                text: root.keepDisplayOn
-                      ? "The lock screen stays lit for the whole lock: video designs keep playing."
-                      : "The lock screen stays lit, then the display powers down."
-                visible: !(root.service && root.service.displayPowerEnabled)
-                color: root.muted
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
+              SettingSection {
+                explorer: root
+                title: root.tr("Screen and power")
+                description: root.tr("How long the lock screen stays lit, and what it can do besides take a password.")
 
-              // Playback rate for the clip designs and the separate unlock clip.
-              Row {
-                spacing: Style.space(6)
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Clip speed"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                // Personal fork: per-output locked idle power (independent main
+                // and side timeouts, tint and hardware power-off) replaces the
+                // single blank delay while it is configured.
+                DisplayPowerSettings {
+                  width: parent.width
+                  visible: root.service && root.service.displayPowerEnabled
+                  settings: root.service ? root.service.displayPowerSettings : ({})
+                  onSettingEdited: function(field, value) {
+                    if (root.service) root.service.setDisplayPowerSetting(field, value)
+                  }
                 }
 
-                Repeater {
-                  model: root.clipSpeeds
+                // Never keeps it powered for the whole lock: video designs keep
+                // playing and slow monitors are never re-blanked mid-wake.
+                SettingRow {
+                  explorer: root
+                  visible: !(root.service && root.service.displayPowerEnabled)
+                  label: root.tr("Blank the display after")
+                  help: root.keepDisplayOn
+                        ? root.tr("The lock screen stays lit for the whole lock: video designs keep playing.")
+                        : root.tr("The lock screen stays lit, then the display powers down.")
+                  options: [
+                    { id: 5000, name: "5s" }, { id: 15000, name: "15s" }, { id: 30000, name: "30s" },
+                    { id: 60000, name: "1m" }, { id: 300000, name: "5m" },
+                    { id: -1, name: root.blankDelayIsCustom ? root.tr("Custom (%1m)").arg(Math.round(root.blankDelay / 60000)) : root.tr("Custom") },
+                    { id: 0, name: root.tr("Never") }
+                  ]
+                  current: root.keepDisplayOn ? 0 : (root.blankDelayIsCustom ? -1 : root.blankDelay)
+                  onPicked: function(id) {
+                    if (id === -1) root.beginCustomDelay()
+                    else root.setBlankAfter(id)
+                  }
+
                   Rectangle {
-                    id: clipSpeedChip
-                    required property real modelData
-                    readonly property bool current: Math.abs(modelData - root.clipSpeed) < 0.01
-                    width: clipSpeedLabel.implicitWidth + Style.space(18)
-                    height: Style.space(26)
+                    visible: root.customDelayEditing
+                    width: Style.space(150)
+                    height: visible ? Style.space(34) : 0
                     radius: root.cornerRadius
-                    color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, clipSpeedArea.containsMouse ? 0.12 : 0.06)
-                    Behavior on color { ColorAnimation { duration: 100 } }
+                    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.06)
+                    border.width: Math.max(1, Style.space(2))
+                    border.color: root.accent
 
+                    // The unit hint lives inside the box, right-aligned, and the
+                    // input reserves its width so typed digits never run under it.
                     Text {
-                      id: clipSpeedLabel
-                      anchors.centerIn: parent
-                      text: clipSpeedChip.modelData + "x"
-                      color: clipSpeedChip.current ? Color.background : root.foreground
+                      anchors.verticalCenter: parent.verticalCenter
+                      anchors.right: parent.right
+                      anchors.rightMargin: Style.space(10)
+                      text: root.tr("min, Enter")
+                      color: root.muted
                       font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.weight: clipSpeedChip.current ? Font.DemiBold : Font.Normal
+                      font.pixelSize: Style.font.bodySmall
                     }
 
+                    TypedInput {
+                      id: customDelayInput
+                      anchors.fill: parent
+                      anchors.leftMargin: Style.space(10)
+                      anchors.rightMargin: Style.space(80)
+                      verticalAlignment: TextInput.AlignVCenter
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                      text: root.customDelayText
+                      onTextEdited: root.customDelayText = text
+                      focus: root.customDelayEditing
+                      validator: IntValidator { bottom: 1; top: 60 }
+
+                      Keys.onEscapePressed: {
+                        root.customDelayEditing = false
+                        keyCatcher.forceActiveFocus()
+                      }
+                      Keys.onReturnPressed: root.commitCustomDelay()
+                    }
+                  }
+                }
+
+                // A key pressed into a blanked screen only wakes it. Nothing
+                // says when a panel is lit again, so this is how long the field
+                // keeps ignoring keys after the wake has run.
+                SettingRow {
+                  explorer: root
+                  visible: !root.keepDisplayOn
+                  label: root.tr("Ignore keys after waking")
+                  help: root.wakeGrace === 0
+                        ? root.tr("Only the keys pressed before the screen wakes are dropped.")
+                        : root.tr("Keys keep waking the screen without typing until the panel has had %1 to light up.")
+                            .arg(root.wakeGrace % 1000 === 0 ? root.wakeGrace / 1000 + "s" : root.wakeGrace + "ms")
+                  options: [{ id: 0, name: root.tr("Off") }, { id: 500, name: "0.5s" }, { id: 1000, name: "1s" }, { id: 2000, name: "2s" }]
+                  current: root.wakeGrace
+                  onPicked: function(id) { root.setWakeGrace(id) }
+                }
+
+                // Off by default: with it on, anyone at the machine can restart
+                // it without knowing the password.
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Power buttons")
+                  help: root.powerActions
+                        ? root.tr("Sleep, restart and shut down sit in the corner. Each asks once more before it happens.")
+                        : root.tr("The lock screen takes a password and nothing else.")
+                  options: root.onOffOptions
+                  current: root.powerActions ? "on" : "off"
+                  onPicked: function(id) { root.setPowerActions(id === "on") }
+                }
+
+                // Off by default too: on, the lock screen says what is playing.
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Media controls")
+                  help: root.mediaControls
+                        ? root.tr("While something plays, its title sits at the top of the lock screen with previous, play or pause, and next.")
+                        : root.tr("The lock screen leaves what is playing alone, and does not say what it is.")
+                  options: root.onOffOptions
+                  current: root.mediaControls ? "on" : "off"
+                  onPicked: function(id) { root.setMediaControls(id === "on") }
+                }
+              }
+
+              SettingSection {
+                explorer: root
+                title: root.tr("Sign-in and security")
+
+                // Face unlock can look the moment the lock comes up, which
+                // recognises whoever locked the screen and lets them straight
+                // back in. Only shown when a face is enrolled.
+                SettingRow {
+                  explorer: root
+                  visible: root.faceConfigured
+                  label: root.tr("Face unlock starts")
+                  help: root.faceStart === "always"
+                        ? root.tr("The camera looks as soon as the screen locks. Locking while you sit in front of it can unlock it again.")
+                        : root.faceStart === "off"
+                          ? root.tr("The camera only looks when you press Enter on an empty field or click the face button.")
+                          : root.tr("The camera looks when the display wakes, or when you come back to a screen that stayed lit, and on Enter or the face button. It never looks at a blanked screen.")
+                  options: [{ id: "wake", name: root.tr("On wake") }, { id: "always", name: root.tr("Always") }, { id: "off", name: root.tr("On request") }]
+                  current: root.faceStart
+                  onPicked: function(id) { root.setFaceStart(id) }
+                }
+
+                // Only with an enrolled finger: without one there is no reader to rest.
+                SettingRow {
+                  explorer: root
+                  visible: root.service ? root.service.fingerprintConfigured === true : false
+                  label: root.tr("Fingerprint on a dark screen")
+                  help: root.fingerprintInDark
+                        ? root.tr("The reader keeps listening while the display is off, so a touch unlocks a dark screen.")
+                        : root.tr("The reader rests while the display is off; wake the screen first. For readers that reset on every try.")
+                  options: root.onOffOptions
+                  current: root.fingerprintInDark ? "on" : "off"
+                  onPicked: function(id) { root.setFingerprintInDark(id === "on") }
+                }
+
+                // Only once /etc/pam.d/omarchy-lock-fido2 is in place; off sends
+                // the lock screen back to the password without touching PAM, so
+                // the key still works everywhere else.
+                SettingRow {
+                  explorer: root
+                  visible: root.fido2Installed
+                  label: root.tr("Security key")
+                  help: root.tr("Off sends the lock screen back to the password; the key still works for sudo and the rest.")
+                  options: root.fido2Options
+                  current: root.fido2Enabled ? "on" : "off"
+                  onPicked: function(id) { root.setFido2Enabled(id === "on") }
+                }
+
+                // Both off by default, and only with the key turned on above:
+                // they follow the key, so without it they have nothing to do.
+                SettingRow {
+                  explorer: root
+                  visible: root.fido2Installed && root.fido2Enabled
+                  label: root.tr("Lock when the key is removed")
+                  help: root.tr("Removing the security key locks the screen.")
+                  options: root.onOffOptions
+                  current: root.lockOnKeyRemoval ? "on" : "off"
+                  onPicked: function(id) { root.setLockOnKeyRemoval(id === "on") }
+                }
+
+                SettingRow {
+                  explorer: root
+                  visible: root.fido2Installed && root.fido2Enabled
+                  label: root.tr("Wake when the key is inserted")
+                  help: root.tr("Inserting the security key lights a dark lock screen, ready for a touch.")
+                  options: root.onOffOptions
+                  current: root.wakeOnKeyInsert ? "on" : "off"
+                  onPicked: function(id) { root.setWakeOnKeyInsert(id === "on") }
+                }
+
+                // Mistakes on your own way in are left out.
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Report failed attempts")
+                  help: root.awayReport
+                        ? root.tr("After you unlock, a notification says if somebody got it wrong while you were away.")
+                        : root.tr("Failed attempts are not reported.")
+                  options: root.onOffOptions
+                  current: root.awayReport ? "on" : "off"
+                  onPicked: function(id) { root.setAwayReport(id === "on") }
+                }
+              }
+
+              SettingSection {
+                explorer: root
+                title: root.tr("System")
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Opens as")
+                  help: root.tr("What omarchy-shell lock explore opens first. The side panel has a button for the full explorer.")
+                  options: root.openAsOptions
+                  current: root.openAs
+                  onPicked: function(id) { root.setOpenAs(id) }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Side panel tour")
+                  help: root.tr("The three hints from the first time the side panel opened.")
+
+                  Rectangle {
+                    width: tourLabel.implicitWidth + Style.space(26)
+                    height: Style.space(34)
+                    radius: root.cornerRadius
+                    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, tourArea.containsMouse ? 0.13 : 0.06)
+                    border.width: 1
+                    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
+                    Text {
+                      id: tourLabel
+                      anchors.centerIn: parent
+                      text: root.tr("Show the tour")
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
                     MouseArea {
-                      id: clipSpeedArea
+                      id: tourArea
                       anchors.fill: parent
                       hoverEnabled: true
-                      onClicked: root.setClipSpeed(clipSpeedChip.modelData)
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.replayTour()
                     }
                   }
                 }
-              }
 
-              // 24-hour or 12-hour AM/PM, for the clock in every design. The
-              // preview on the right redraws as you press it.
-              Row {
-                spacing: Style.space(6)
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Clock"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Bar icon")
+                  help: root.tr("A lock in the bar. A click opens the same as omarchy-shell lock explore, a right click the full explorer.")
+                  options: root.shownHiddenOptions
+                  current: root.barIconShown ? "show" : "hide"
+                  onPicked: function(id) { root.setBarIcon(id === "show") }
                 }
 
-                Repeater {
-                  model: root.clockFormats
+                // An entry in the app launcher and under Style in the Omarchy
+                // menu. A plugin cannot add those on install, so it is a choice.
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Omarchy menu")
+                  help: root.tr("An entry in the app launcher and under Style in the Omarchy menu.")
+                  options: root.menuEntryOptions
+                  current: root.menuEntryInstalled ? "on" : "off"
+                  onPicked: function(id) { root.setMenuEntry(id === "on") }
+                }
+
+                SettingRow {
+                  explorer: root
+                  label: root.tr("Check this install")
+                  help: root.healthIssues.length === 0
+                        ? root.tr("Nothing missing that the explorer can see. The full check opens in a terminal, with a fix for anything it finds.")
+                        : root.tr("Opens a terminal with every check and its fix.")
+
                   Rectangle {
-                    id: clockFormatChip
-                    required property var modelData
-                    readonly property bool current: (modelData.id === "12") === root.twelveHour
-                    width: clockFormatLabel.implicitWidth + Style.space(18)
-                    height: Style.space(26)
+                    width: doctorLabel.implicitWidth + Style.space(26)
+                    height: Style.space(34)
                     radius: root.cornerRadius
-                    color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, clockFormatArea.containsMouse ? 0.12 : 0.06)
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
+                    color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, doctorArea.containsMouse ? 0.13 : 0.06)
+                    border.width: 1
+                    border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.10)
                     Text {
-                      id: clockFormatLabel
+                      id: doctorLabel
                       anchors.centerIn: parent
-                      text: clockFormatChip.modelData.name
-                      color: clockFormatChip.current ? Color.background : root.foreground
+                      text: root.tr("Run the check")
+                      color: root.foreground
                       font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.weight: clockFormatChip.current ? Font.DemiBold : Font.Normal
+                      font.pixelSize: Style.font.bodySmall
                     }
-
                     MouseArea {
-                      id: clockFormatArea
+                      id: doctorArea
                       anchors.fill: parent
                       hoverEnabled: true
-                      onClicked: root.setTwelveHour(clockFormatChip.modelData.id === "12")
-                    }
-                  }
-                }
-              }
-
-              // An entry in the app launcher and under Style in the Omarchy
-              // menu. A plugin cannot add those on install, so it is a choice.
-              Row {
-                spacing: Style.space(6)
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Omarchy menu"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Repeater {
-                  model: root.menuEntryOptions
-                  Rectangle {
-                    id: menuEntryChip
-                    required property var modelData
-                    readonly property bool current: (modelData.id === "on") === root.menuEntryInstalled
-                    width: menuEntryLabel.implicitWidth + Style.space(18)
-                    height: Style.space(26)
-                    radius: root.cornerRadius
-                    color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, menuEntryArea.containsMouse ? 0.12 : 0.06)
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                    Text {
-                      id: menuEntryLabel
-                      anchors.centerIn: parent
-                      text: menuEntryChip.modelData.name
-                      color: menuEntryChip.current ? Color.background : root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.weight: menuEntryChip.current ? Font.DemiBold : Font.Normal
-                    }
-
-                    MouseArea {
-                      id: menuEntryArea
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      onClicked: root.setMenuEntry(menuEntryChip.modelData.id === "on")
-                    }
-                  }
-                }
-              }
-
-              // Only shown once /etc/pam.d/omarchy-lock-fido2 is in place; off
-              // sends the lock screen back to the password without touching
-              // PAM, so the key still works everywhere else.
-              Row {
-                spacing: Style.space(6)
-                visible: root.fido2Installed
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Security key"
-                  color: root.muted
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-
-                Repeater {
-                  model: root.fido2Options
-                  Rectangle {
-                    id: fido2Chip
-                    required property var modelData
-                    readonly property bool current: (modelData.id === "on") === root.fido2Enabled
-                    width: fido2ChipLabel.implicitWidth + Style.space(18)
-                    height: Style.space(26)
-                    radius: root.cornerRadius
-                    color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, fido2ChipArea.containsMouse ? 0.12 : 0.06)
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                    Text {
-                      id: fido2ChipLabel
-                      anchors.centerIn: parent
-                      text: fido2Chip.modelData.name
-                      color: fido2Chip.current ? Color.background : root.foreground
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                      font.weight: fido2Chip.current ? Font.DemiBold : Font.Normal
-                    }
-
-                    MouseArea {
-                      id: fido2ChipArea
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      onClicked: root.setFido2Enabled(fido2Chip.modelData.id === "on")
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.runDoctor()
                     }
                   }
                 }
@@ -1836,7 +2831,7 @@ Item {
                 visible: root.mainTab === "boot"
                 width: parent.width
                 wrapMode: Text.WordWrap
-                text: "Now: " + root.bootNowName + (root.bootAppliedTheme.length > 0 ? " \u00b7 baked from " + root.bootAppliedTheme : "")
+                text: root.tr("Now: %1").arg(root.bootNowName) + (root.bootAppliedTheme.length > 0 ? " \u00b7 " + root.tr("Baked from %1").arg(root.bootAppliedTheme) : "")
                 textFormat: Text.PlainText
                 color: root.muted
                 font.family: root.fontFamily
@@ -1872,10 +2867,10 @@ Item {
                     width: parent.width - applyBtn.width - Style.space(50)
                     wrapMode: Text.WordWrap
                     text: root.bootApplying
-                      ? "Applying the boot theme\u2026"
-                      : "Set to " + root.bootDesiredName + ". Applying writes the boot theme to the EFI partition and asks for your password."
+                      ? root.tr("Applying the boot theme\u2026")
+                      : root.tr("Set to %1. Applying writes the boot theme to the EFI partition and asks for your password.").arg(root.bootDesiredName)
                     textFormat: Text.PlainText
-                    color: Color.menu.text
+                    color: Commons.Color.menu.text
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
@@ -1891,8 +2886,8 @@ Item {
                     Text {
                       id: applyBtnLabel
                       anchors.centerIn: parent
-                      text: root.bootApplying ? "Building\u2026" : "Apply"
-                      color: Color.background
+                      text: root.bootApplying ? root.tr("Building\u2026") : root.tr("Apply")
+                      color: Commons.Color.background
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.bodySmall
                       font.weight: Font.DemiBold
@@ -1933,7 +2928,7 @@ Item {
                         anchors.centerIn: parent
                         visible: root.bootSetting === "follow"
                         text: "\u2713"
-                        color: Color.background
+                        color: Commons.Color.background
                         font.pixelSize: Style.font.caption
                         font.weight: Font.Bold
                       }
@@ -1944,7 +2939,7 @@ Item {
                       spacing: 0
 
                       Text {
-                        text: "Follow my lock screen"
+                        text: root.tr("Follow my lock screen")
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -1990,7 +2985,7 @@ Item {
                         anchors.centerIn: parent
                         visible: root.bootResync
                         text: "\u2713"
-                        color: Color.background
+                        color: Commons.Color.background
                         font.pixelSize: Style.font.caption
                         font.weight: Font.Bold
                       }
@@ -1998,7 +2993,7 @@ Item {
 
                     Text {
                       anchors.verticalCenter: parent.verticalCenter
-                      text: "Re-apply when the Omarchy theme changes"
+                      text: root.tr("Re-apply when the Omarchy theme changes")
                       color: root.foreground
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
@@ -2013,9 +3008,8 @@ Item {
                 }
 
                 Rectangle {
-                  // Rotation ships hidden in 1.5.0: enabling it installs a
-                  // passwordless-root helper (rotate-setup.sh) that has not
-                  // been tested end to end. Flip visible when that lands.
+                  // Rotation ships hidden: it has not been tested end to
+                  // end, and each step asks through polkit after login.
                   visible: false
                   width: rotateRow.implicitWidth + Style.space(8)
                   height: Style.space(30)
@@ -2039,7 +3033,7 @@ Item {
                         anchors.centerIn: parent
                         visible: root.bootRotating
                         text: "\u2713"
-                        color: Color.background
+                        color: Commons.Color.background
                         font.pixelSize: Style.font.caption
                         font.weight: Font.Bold
                       }
@@ -2050,7 +3044,7 @@ Item {
                       spacing: 0
 
                       Text {
-                        text: "Rotate boot screens"
+                        text: root.tr("Rotate boot screens")
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -2062,8 +3056,8 @@ Item {
                         width: Math.min(implicitWidth, Style.space(230))
                         elide: Text.ElideRight
                         text: root.bootRotating
-                          ? "Tick the cards below \u00b7 advances one per boot (" + root.bootRotation.length + " picked)"
-                          : "A different one each boot, set up once"
+                          ? root.tr("Tick the cards below") + " \u00b7 " + root.tr("advances one per boot (%1 picked)").arg(root.bootRotation.length)
+                          : root.tr("A different one each boot, set up once")
                         color: root.muted
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -2085,7 +3079,7 @@ Item {
 
                   Text {
                     anchors.verticalCenter: parent.verticalCenter
-                    text: "Clip length"
+                    text: root.tr("Clip length")
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -2106,8 +3100,8 @@ Item {
                       Text {
                         id: clipLenLabel
                         anchors.centerIn: parent
-                        text: clipLen.modelData === 0 ? "Full" : clipLen.modelData + "s"
-                        color: clipLen.current ? Color.background : root.foreground
+                        text: clipLen.modelData === 0 ? root.tr("Full") : clipLen.modelData + "s"
+                        color: clipLen.current ? Commons.Color.background : root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
                         font.weight: clipLen.current ? Font.DemiBold : Font.Normal
@@ -2118,6 +3112,92 @@ Item {
                         anchors.fill: parent
                         hoverEnabled: true
                         onClicked: root.setBootClipSeconds(clipLen.modelData)
+                      }
+                    }
+                  }
+
+                  Item { width: Style.space(10); height: 1 }
+
+                  // What reboot and shutdown show on a snapshot or custom
+                  // boot screen, see bootShutdown in Service.qml.
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.tr("Reboot & shutdown")
+                    color: root.muted
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Repeater {
+                    model: ["design", "plain"]
+                    Rectangle {
+                      id: downMode
+                      required property string modelData
+                      readonly property bool current: modelData === root.bootShutdown
+                      width: downModeLabel.implicitWidth + Style.space(16)
+                      height: Style.space(24)
+                      radius: root.cornerRadius
+                      color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, downModeArea.containsMouse ? 0.12 : 0.06)
+                      Behavior on color { ColorAnimation { duration: 100 } }
+
+                      Text {
+                        id: downModeLabel
+                        anchors.centerIn: parent
+                        text: downMode.modelData === "design" ? root.tr("Design") : root.tr("Plain")
+                        color: downMode.current ? Commons.Color.background : root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.weight: downMode.current ? Font.DemiBold : Font.Normal
+                      }
+
+                      MouseArea {
+                        id: downModeArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: root.setBootShutdown(downMode.modelData)
+                      }
+                    }
+                  }
+
+                  Item { width: Style.space(10); height: 1 }
+
+                  // Whether a snapshot boot screen keeps the design's clock,
+                  // see bootClock in Service.qml.
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: root.tr("Clock on boot screen")
+                    color: root.muted
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Repeater {
+                    model: ["show", "hide"]
+                    Rectangle {
+                      id: bootClk
+                      required property string modelData
+                      readonly property bool current: modelData === root.bootClock
+                      width: bootClkLabel.implicitWidth + Style.space(16)
+                      height: Style.space(24)
+                      radius: root.cornerRadius
+                      color: current ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, bootClkArea.containsMouse ? 0.12 : 0.06)
+                      Behavior on color { ColorAnimation { duration: 100 } }
+
+                      Text {
+                        id: bootClkLabel
+                        anchors.centerIn: parent
+                        text: bootClk.modelData === "show" ? root.tr("Show") : root.tr("Hide")
+                        color: bootClk.current ? Commons.Color.background : root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.weight: bootClk.current ? Font.DemiBold : Font.Normal
+                      }
+
+                      MouseArea {
+                        id: bootClkArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        onClicked: root.setBootClock(bootClk.modelData)
                       }
                     }
                   }
@@ -2143,7 +3223,7 @@ Item {
                       width: Style.space(252)
                       height: Style.space(142)
                       radius: root.cornerRadius
-                      color: Qt.rgba(0, 0, 0, 0.3)
+                      color: root.shade(0.3)
                       border.width: bootCard.picked ? Math.max(2, Style.space(3)) : 1
                       border.color: bootCard.picked ? root.accent
                                   : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, bootCardArea.containsMouse ? 0.4 : 0.15)
@@ -2152,7 +3232,7 @@ Item {
 
                       Text {
                         anchors.centerIn: parent
-                        text: "rendering preview..."
+                        text: root.tr("rendering preview...")
                         color: root.muted
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -2180,8 +3260,8 @@ Item {
                         Text {
                           id: onDiskLabel
                           anchors.centerIn: parent
-                          text: "\u2713 Applied"
-                          color: Color.background
+                          text: "\u2713 " + root.tr("Applied")
+                          color: Commons.Color.background
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
                           font.weight: Font.DemiBold
@@ -2206,14 +3286,14 @@ Item {
                         width: Style.space(26)
                         height: Style.space(26)
                         radius: root.cornerRadius
-                        color: root.inRotation(bootCard.modelData.id) ? root.accent : Qt.rgba(0, 0, 0, 0.55)
+                        color: root.inRotation(bootCard.modelData.id) ? root.accent : root.shade(0.55)
                         border.width: 1
                         border.color: root.inRotation(bootCard.modelData.id) ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.4)
 
                         Text {
                           anchors.centerIn: parent
                           text: root.inRotation(bootCard.modelData.id) ? "\u2713" : "+"
-                          color: root.inRotation(bootCard.modelData.id) ? Color.background : root.foreground
+                          color: root.inRotation(bootCard.modelData.id) ? Commons.Color.background : root.foreground
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.bodySmall
                           font.weight: Font.Bold
@@ -2228,14 +3308,14 @@ Item {
                         width: bootEditLabel.implicitWidth + Style.space(14)
                         height: Style.space(24)
                         radius: root.cornerRadius
-                        color: Qt.rgba(0, 0, 0, bootEditArea.containsMouse ? 0.8 : 0.55)
+                        color: root.shade(bootEditArea.containsMouse ? 0.8 : 0.55)
                         border.width: 1
                         border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
 
                         Text {
                           id: bootEditLabel
                           anchors.centerIn: parent
-                          text: "Edit"
+                          text: root.tr("Edit")
                           color: root.foreground
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
@@ -2258,15 +3338,15 @@ Item {
                         width: bootDelLabel.implicitWidth + Style.space(14)
                         height: Style.space(24)
                         radius: root.cornerRadius
-                        color: root.confirmingDelete === bootCard.modelData.id ? "#a54242" : Qt.rgba(0, 0, 0, bootDelArea.containsMouse ? 0.8 : 0.55)
+                        color: root.confirmingDelete === bootCard.modelData.id ? root.danger : root.shade(bootDelArea.containsMouse ? 0.8 : 0.55)
                         border.width: 1
-                        border.color: root.confirmingDelete === bootCard.modelData.id ? "#c96a6a" : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
+                        border.color: root.confirmingDelete === bootCard.modelData.id ? Qt.lighter(root.danger, 1.3) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.3)
 
                         Text {
                           id: bootDelLabel
                           anchors.centerIn: parent
-                          text: root.confirmingDelete === bootCard.modelData.id ? "Sure?" : "Delete"
-                          color: root.confirmingDelete === bootCard.modelData.id ? "#ffffff" : root.foreground
+                          text: root.tr(root.confirmingDelete === bootCard.modelData.id ? "Sure?" : "Delete")
+                          color: root.confirmingDelete === bootCard.modelData.id ? Commons.Color.background : root.foreground
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
                         }
@@ -2333,7 +3413,7 @@ Item {
                         width: parent.width
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.WordWrap
-                        text: "Snapshot this lock screen"
+                        text: root.tr("Snapshot this lock screen")
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -2349,7 +3429,7 @@ Item {
                   }
 
                   Text {
-                    text: (Designs.byId(root.activeDesignId) ? Designs.byId(root.activeDesignId).name : "current") + " as a still"
+                    text: root.tr("%1 as a still").arg(Designs.byId(root.activeDesignId, root.userDesigns) ? Designs.byId(root.activeDesignId, root.userDesigns).name : root.tr("current"))
                     textFormat: Text.PlainText
                     color: root.muted
                     font.family: root.fontFamily
@@ -2377,7 +3457,7 @@ Item {
                       width: Style.space(252)
                       height: Style.space(142)
                       radius: root.cornerRadius
-                      color: Qt.rgba(0, 0, 0, 0.3)
+                      color: root.shade(0.3)
                       border.width: 1
                       border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, editorCardArea.containsMouse ? 0.4 : 0.15)
                       clip: true
@@ -2436,7 +3516,7 @@ Item {
 
                       Text {
                         anchors.horizontalCenter: parent.horizontalCenter
-                        text: "New layout"
+                        text: root.tr("New layout")
                         color: root.muted
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -2452,7 +3532,7 @@ Item {
                   }
 
                   Text {
-                    text: "One layout, both screens"
+                    text: root.tr("One layout, both screens")
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -2480,25 +3560,27 @@ Item {
                   }
 
                   BootField {
-                    label: "Background"
+                    label: root.tr("Background")
                     control: "dropdown"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
                     value: root.bootFormGet("background", "theme")
+                    optionNames: root.bootOptionNames
                     options: ["theme", "wallpaper"]
                     onSelected: function(o) { root.bootFormSet("background", o) }
                   }
                   BootField {
-                    label: "Logo"
+                    label: root.tr("Logo")
                     control: "dropdown"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
                     value: root.bootFormGet("logo", "theme")
+                    optionNames: root.bootOptionNames
                     options: ["theme", "none"]
                     onSelected: function(o) { root.bootFormSet("logo", o) }
                   }
                   BootField {
-                    label: "Title"
+                    label: root.tr("Title")
                     control: "text"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2506,7 +3588,7 @@ Item {
                     onEdited: function(t) { root.bootFormSet("title", t) }
                   }
                   BootField {
-                    label: "Subtitle"
+                    label: root.tr("Subtitle")
                     control: "text"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2514,7 +3596,7 @@ Item {
                     onEdited: function(t) { root.bootFormSet("subtitle", t) }
                   }
                   BootField {
-                    label: "Clock (lock screen)"
+                    label: root.tr("Clock (lock screen)")
                     control: "toggle"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2522,16 +3604,17 @@ Item {
                     onToggled: root.bootFormSet("clock", root.bootFormGet("clock", "on") === "on" ? "off" : "on")
                   }
                   BootField {
-                    label: "Passphrase field"
+                    label: root.tr("Passphrase field")
                     control: "dropdown"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
                     value: root.bootFormGet("entry", "pill")
+                    optionNames: root.bootOptionNames
                     options: ["pill", "line", "none"]
                     onSelected: function(o) { root.bootFormSet("entry", o) }
                   }
                   BootField {
-                    label: "Scanlines"
+                    label: root.tr("Scanlines")
                     control: "toggle"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2539,7 +3622,7 @@ Item {
                     onToggled: root.bootFormSet("scanlines", root.bootFormGet("scanlines", "off") === "on" ? "off" : "on")
                   }
                   BootField {
-                    label: "Title position"
+                    label: root.tr("Title position")
                     control: "stepper"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2547,7 +3630,7 @@ Item {
                     onStep: function(d) { root.bootFormSet("title_y", Math.max(0, Math.min(100, (parseInt(root.bootFormGet("title_y", "18")) || 18) + d * 4))) }
                   }
                   BootField {
-                    label: "Title size"
+                    label: root.tr("Title size")
                     control: "stepper"
                     suffix: ""
                     rev: root.bootFormRev
@@ -2556,7 +3639,7 @@ Item {
                     onStep: function(d) { root.bootFormSet("title_size", Math.max(10, Math.min(64, (parseInt(root.bootFormGet("title_size", "26")) || 26) + d * 2))) }
                   }
                   BootField {
-                    label: "Subtitle position"
+                    label: root.tr("Subtitle position")
                     control: "stepper"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2564,7 +3647,7 @@ Item {
                     onStep: function(d) { root.bootFormSet("subtitle_y", Math.max(0, Math.min(100, (parseInt(root.bootFormGet("subtitle_y", "26")) || 26) + d * 4))) }
                   }
                   BootField {
-                    label: "Subtitle size"
+                    label: root.tr("Subtitle size")
                     control: "stepper"
                     suffix: ""
                     rev: root.bootFormRev
@@ -2573,7 +3656,7 @@ Item {
                     onStep: function(d) { root.bootFormSet("subtitle_size", Math.max(8, Math.min(40, (parseInt(root.bootFormGet("subtitle_size", "15")) || 15) + d * 1))) }
                   }
                   BootField {
-                    label: "Field position"
+                    label: root.tr("Field position")
                     control: "stepper"
                     rev: root.bootFormRev
                     onEscaped: { keyCatcher.forceActiveFocus(); root.handleEscape() }
@@ -2592,7 +3675,7 @@ Item {
                     Column {
                       spacing: Style.space(6)
                       Text {
-                        text: "Lock screen"
+                        text: root.tr("Lock screen")
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
@@ -2603,14 +3686,14 @@ Item {
                         width: Math.floor((settingsColumn.width - Style.space(360) - Style.space(24) - Style.space(14)) / 2)
                         height: Math.round(width * 9 / 16)
                         radius: root.cornerRadius
-                        color: Qt.rgba(0, 0, 0, 0.3)
+                        color: root.shade(0.3)
                         border.width: 1
                         border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
                         clip: true
                         Text {
                           anchors.centerIn: parent
                           visible: editorLockPreview.status !== Image.Ready
-                          text: "rendering preview..."
+                          text: root.tr("rendering preview...")
                           color: root.muted
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
@@ -2624,11 +3707,11 @@ Item {
                           width: busyLabel1.implicitWidth + Style.space(14)
                           height: Style.space(22)
                           radius: root.cornerRadius
-                          color: Qt.rgba(0, 0, 0, 0.6)
+                          color: root.shade(0.6)
                           Text {
                             id: busyLabel1
                             anchors.centerIn: parent
-                            text: "re-rendering…"
+                            text: root.tr("re-rendering…")
                             color: root.foreground
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
@@ -2654,7 +3737,7 @@ Item {
                     Column {
                       spacing: Style.space(6)
                       Text {
-                        text: "Boot screen"
+                        text: root.tr("Boot screen")
                         color: root.foreground
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
@@ -2664,14 +3747,14 @@ Item {
                         width: edLockRect.width
                         height: edLockRect.height
                         radius: root.cornerRadius
-                        color: Qt.rgba(0, 0, 0, 0.3)
+                        color: root.shade(0.3)
                         border.width: 1
                         border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
                         clip: true
                         Text {
                           anchors.centerIn: parent
                           visible: editorBootPreview.status !== Image.Ready
-                          text: "rendering preview..."
+                          text: root.tr("rendering preview...")
                           color: root.muted
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
@@ -2685,11 +3768,11 @@ Item {
                           width: busyLabel2.implicitWidth + Style.space(14)
                           height: Style.space(22)
                           radius: root.cornerRadius
-                          color: Qt.rgba(0, 0, 0, 0.6)
+                          color: root.shade(0.6)
                           Text {
                             id: busyLabel2
                             anchors.centerIn: parent
-                            text: "re-rendering…"
+                            text: root.tr("re-rendering…")
                             color: root.foreground
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
@@ -2716,7 +3799,8 @@ Item {
                   Text {
                     width: edLockRect.width * 2 + Style.space(14)
                     wrapMode: Text.WordWrap
-                    text: "Changes save and re-render automatically \u00b7 Esc goes back \u00b7 apply the boot screen from its card, pick the lock screen on the Lock screens tab. $USER and $HOST expand."
+                    text: root.tr("Changes save and re-render automatically") + " \u00b7 " + root.tr("Esc goes back") + " \u00b7 "
+                      + root.tr("apply the boot screen from its card, pick the lock screen under Styling or Animation. $USER and $HOST expand.")
                     color: root.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -2746,8 +3830,10 @@ Item {
           model: {
             var r = root.service ? root.service.designsRevision : 0
             return [
-              { id: "styling", name: "Styling", count: Designs.stylings().length },
-              { id: "animation", name: "Animation", count: Designs.animations().length },
+              { id: "styling", name: "Styling", count: Designs.stylings(root.userDesigns).length },
+              { id: "animation", name: "Animation", count: Designs.animations(root.userDesigns).length },
+              { id: "seasonal", name: "Seasonal", count: Designs.seasonal(root.userDesigns).length },
+              { id: "favorites", name: "Favorites", count: root.favoriteDesigns().length },
               { id: "boot", name: "Boot screen", count: 0 },
               { id: "settings", name: "Settings", count: 0 }
             ]
@@ -2774,8 +3860,8 @@ Item {
               anchors.left: parent.left
               anchors.leftMargin: Style.space(12)
               anchors.verticalCenter: parent.verticalCenter
-              text: (navItem.modelData.name + (navItem.modelData.id === "boot" && root.bootApplying ? " ·" : "")).toUpperCase()
-              color: navItem.current ? Color.menu.text : root.muted
+              text: (root.tr(navItem.modelData.name) + (navItem.modelData.id === "boot" && root.bootApplying ? " ·" : "")).toUpperCase()
+              color: navItem.current ? Commons.Color.menu.text : root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.weight: navItem.current ? Font.Bold : Font.Normal
@@ -2791,19 +3877,6 @@ Item {
               color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.45)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
-            }
-
-            // The boot screen ships as experimental; say so where it is picked.
-            Text {
-              anchors.right: parent.right
-              anchors.rightMargin: Style.space(12)
-              anchors.verticalCenter: parent.verticalCenter
-              visible: navItem.modelData.id === "boot" && !root.bootApplying
-              text: "EXP"
-              color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.75)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.letterSpacing: 1
             }
 
             // Pending dot when the boot screen has an unapplied change.
@@ -2843,7 +3916,7 @@ Item {
 
         Text {
           anchors.centerIn: parent
-          text: "+ New design"
+          text: "+ " + root.tr("New design")
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -2874,8 +3947,8 @@ Item {
 
         Text {
           anchors.centerIn: parent
-          text: "+ New clip"
-          color: newClipArea.containsMouse ? Color.menu.text : root.muted
+          text: "+ " + root.tr("New clip")
+          color: newClipArea.containsMouse ? Commons.Color.menu.text : root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
@@ -2904,8 +3977,8 @@ Item {
 
         Text {
           anchors.centerIn: parent
-          text: "+ New styling"
-          color: newStylingArea.containsMouse ? Color.menu.text : root.muted
+          text: "+ " + root.tr("New styling")
+          color: newStylingArea.containsMouse ? Commons.Color.menu.text : root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
         }
@@ -2936,7 +4009,7 @@ Item {
         Row {
           width: parent.width
           Text {
-            text: "LOCK SCREEN"
+            text: root.tr("LOCK SCREEN")
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2944,12 +4017,12 @@ Item {
           }
           Item { width: parent.width - lockLbl.width - liveLbl.width; height: 1 }
           Text {
-            id: lockLbl; visible: false; text: "LOCK SCREEN"
+            id: lockLbl; visible: false; text: root.tr("LOCK SCREEN")
             font.family: root.fontFamily; font.pixelSize: Style.font.caption; font.letterSpacing: 2
           }
           Text {
             id: liveLbl
-            text: "● live"
+            text: "● " + root.tr("Live")
             color: root.accent
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -2961,7 +4034,7 @@ Item {
           width: parent.width
           height: Math.round(parent.width * 9 / 16)
           radius: root.cornerRadius
-          color: Color.background
+          color: Commons.Color.background
           border.width: 1
           border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
           clip: true
@@ -2976,16 +4049,27 @@ Item {
               anchors.fill: parent
               designId: root.selectedDesign ? root.selectedDesign.id : root.activeDesignId
               revision: root.service ? root.service.designsRevision : 0
+              userDesigns: root.userDesigns
               twelveHour: root.twelveHour
+              wallpaperBlur: root.wallpaperBlurValue
+              wallpaperDim: root.wallpaperDimShift
+              uiScale: root.uiScale
+              holdStill: root.motionReduced
+              language: root.lockLanguage
+              fullName: root.accountName
+              showLayoutBadge: root.showLayoutBadge
+              showCapsBadge: root.showCapsBadge
+              allowPasswordToggle: root.allowPasswordToggle
+              showAuthIcons: root.showAuthIcons
               backgroundPath: root.service ? root.service.backgroundPath : ""
               backgroundVersion: root.service ? root.service.backgroundVersion : 0
               avatarPath: root.service ? root.service.avatarPath : ""
               avatarVersion: root.service ? root.service.avatarVersion : 0
               inputEnabled: false
-              loadBackground: root.opened
+              loadBackground: root.opened && !root.sideView
               passwordText: "omarchy"
               videoPath: root.service ? root.service.videoPath : ""
-              videoPlaying: root.opened
+              videoPlaying: root.opened && !root.sideView
             }
           }
         }
@@ -2999,7 +4083,7 @@ Item {
           border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
           Text {
             anchors.centerIn: parent
-            text: "Preview full screen · Space"
+            text: root.tr("Preview full screen") + " · Space"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -3017,7 +4101,7 @@ Item {
         Row {
           width: parent.width
           Text {
-            text: "BOOT SCREEN"
+            text: root.tr("BOOT SCREEN")
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -3033,7 +4117,7 @@ Item {
             width: Style.space(150)
             height: Math.round(Style.space(150) * 9 / 16)
             radius: root.cornerRadius
-            color: Color.background
+            color: Commons.Color.background
             border.width: 1
             border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
             clip: true
@@ -3054,7 +4138,7 @@ Item {
             Text {
               anchors.centerIn: parent
               visible: root.bootApplied.length === 0 && appliedBootThumb.status !== Image.Ready
-              text: "stock"
+              text: root.tr("stock")
               color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -3069,21 +4153,23 @@ Item {
               elide: Text.ElideRight
               text: root.bootNowName
               textFormat: Text.PlainText
-              color: Color.menu.text
+              color: Commons.Color.menu.text
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: root.bootApplying ? "Rebuilding…" : (root.bootAppliedTheme.length > 0 ? "baked from " + root.bootAppliedTheme : "the disk passphrase screen")
+              text: root.bootApplying ? root.tr("Rebuilding…") : (root.bootAppliedTheme.length > 0 ? root.tr("Baked from %1").arg(root.bootAppliedTheme) : root.tr("The disk passphrase screen"))
               textFormat: Text.PlainText
               color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
             }
             Text {
-              text: "Boot screen settings ›"
+              width: parent.width
+              wrapMode: Text.WordWrap
+              text: root.tr("Boot screen settings") + " ›"
               color: root.accent
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -3093,9 +4179,25 @@ Item {
         }
       }
 
+      // What an empty grid means: nothing starred yet, or no match.
+      Text {
+        visible: root.gridTab && root.designs.length === 0
+        anchors.centerIn: grid
+        width: Math.min(grid.width, Style.space(420))
+        horizontalAlignment: Text.AlignHCenter
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        text: root.searchText.trim().length > 0
+              ? root.tr("No design matches “%1”. Esc clears the search.").arg(root.searchText.trim())
+              : root.tr("Nothing starred yet. Press F on a design, or click the star on its card, to keep it here.")
+        color: root.muted
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+
       GridView {
         id: grid
-        visible: root.mainTab === "styling" || root.mainTab === "animation"
+        visible: root.gridTab
         anchors.top: header.bottom
         anchors.bottom: footer.top
         anchors.left: parent.left
@@ -3126,12 +4228,45 @@ Item {
           width: grid.cellWidth
           height: grid.cellHeight
 
+          // Its turn to build: see thumbSlots. Once started it stays built.
+          readonly property int rank: index - root.gridTopRow * root.columns
+          readonly property bool mayLoad: inView && rank < root.thumbSlots
+          property bool wanted: false
+          onMayLoadChanged: if (mayLoad) wanted = true
+          Component.onCompleted: if (mayLoad) wanted = true
+
+          readonly property string cachedThumb: root.thumbFor(modelData.id)
+          readonly property bool designUp: thumbLoader.status === Loader.Ready && !!thumbLoader.item && !!thumbLoader.item.item
+          // Over a picture the live design fades in once it has had a moment
+          // to draw; with no picture it shows as soon as it is there.
+          property bool liveShown: false
+          onDesignUpChanged: {
+            if (!designUp) return
+            if (cachedThumb.length === 0) liveShown = true
+            else thumbnailRevealTimer.restart()
+            if (cachedThumb.length === 0) grabTimer.restart()
+          }
+          onCachedThumbChanged: if (cachedThumb.length === 0 && designUp) grabTimer.restart()
+          Timer { id: thumbnailRevealTimer; interval: 700; onTriggered: cell.liveShown = true }
+          // A first picture soon, so a quick change of tab already has one,
+          // and a second once slow wallpapers and intros have finished.
+          Timer { id: grabTimer; interval: 1200; onTriggered: { cell.grabThumb(false); regrabTimer.restart() } }
+          Timer { id: regrabTimer; interval: 3500; onTriggered: cell.grabThumb(true) }
+          function grabThumb(again) {
+            if (!root.opened || !cell.inView || !thumbLoader.item || (!again && cell.cachedThumb.length > 0)) return
+            var id = cell.modelData.id
+            var key = root.thumbStateKey
+            var dpr = Screen.devicePixelRatio || 1
+            thumbLoader.item.grabToImage(function(result) { root.keepThumb(id, key, result) },
+              Qt.size(Math.round(root.thumbWidth * dpr), Math.round(root.thumbHeight * dpr)))
+          }
+
           Rectangle {
             id: frame
             width: root.thumbWidth
             height: root.thumbHeight
             radius: root.cornerRadius
-            color: Color.background
+            color: Commons.Color.background
             border.width: cell.selected ? 3 : 1
             border.color: cell.selected ? root.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
             clip: true
@@ -3141,20 +4276,42 @@ Item {
               anchors.fill: parent
               anchors.margins: frame.border.width
               clip: true
+              Image {
+                anchors.fill: parent
+                visible: cell.inView && source != "" && !(cell.liveShown && cell.designUp)
+                source: cell.cachedThumb
+                cache: false
+                smooth: true
+              }
               Item {
                 width: panel.width
                 height: panel.height
                 scale: (frame.width - frame.border.width * 2) / panel.width
                 transformOrigin: Item.TopLeft
                 visible: cell.inView
+                opacity: cell.liveShown ? 1 : 0
+                Behavior on opacity { NumberAnimation { duration: 180 } }
                 Loader {
+                  id: thumbLoader
                   anchors.fill: parent
                   asynchronous: true
-                  active: cell.inView && root.opened
+                  active: cell.wanted
                   sourceComponent: LockHost {
+                    stillTextureSize: Qt.size(root.thumbWidth, root.thumbHeight)
                     designId: cell.modelData.id
                     revision: root.service ? root.service.designsRevision : 0
+                    userDesigns: root.userDesigns
                     twelveHour: root.twelveHour
+                    wallpaperBlur: root.wallpaperBlurValue
+                    wallpaperDim: root.wallpaperDimShift
+                    uiScale: root.uiScale
+                    holdStill: root.motionReduced
+                    language: root.lockLanguage
+                    fullName: root.accountName
+                    showLayoutBadge: root.showLayoutBadge
+                    showCapsBadge: root.showCapsBadge
+                    allowPasswordToggle: root.allowPasswordToggle
+                    showAuthIcons: root.showAuthIcons
                     backgroundPath: root.service ? root.service.backgroundPath : ""
                     backgroundVersion: root.service ? root.service.backgroundVersion : 0
                     avatarPath: root.service ? root.service.avatarPath : ""
@@ -3164,7 +4321,9 @@ Item {
                     loadBackground: root.opened
                     passwordText: "omarchy"
                     videoPath: root.service ? root.service.videoPath : ""
-                    // Only the selected cell decodes its video; unselected cards display static background thumbnails.
+                    // Only the cell on screen decodes, the rest hold still.
+                    // Personal fork: only the selected card decodes its video;
+                    // the others show static background thumbnails.
                     videoPlaying: cell.selected && cell.inView
                   }
                 }
@@ -3174,14 +4333,42 @@ Item {
             Rectangle {
               anchors.left: parent.left; anchors.top: parent.top; anchors.margins: Style.space(10)
               width: Style.space(24); height: Style.space(24); radius: 5
-              color: Qt.rgba(0, 0, 0, 0.55)
+              color: root.shade(0.55)
               Text {
                 anchors.centerIn: parent
                 text: (cell.index + 1)
-                color: "#ffffff"
+                color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
+              }
+            }
+
+            // Favorite: shown when starred, and on the selected card as the
+            // way to star it with the mouse. Above the card's own click area,
+            // which is declared after it.
+            Rectangle {
+              z: 2
+              readonly property bool starred: root.isFavorite(cell.modelData.id)
+              visible: starred || cell.selected
+              anchors.left: parent.left; anchors.top: parent.top
+              anchors.leftMargin: Style.space(40); anchors.topMargin: Style.space(10)
+              width: Style.space(24); height: Style.space(24); radius: 5
+              color: root.shade(0.55)
+              Text {
+                anchors.centerIn: parent
+                text: parent.starred ? "★" : "☆"
+                color: parent.starred ? root.accent : root.muted
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              MouseArea {
+                anchors.fill: parent
+                z: 1
+                onClicked: {
+                  root.selectedIndex = cell.index
+                  if (root.service && typeof root.service.toggleFavorite === "function") root.service.toggleFavorite(cell.modelData.id)
+                }
               }
             }
 
@@ -3193,8 +4380,8 @@ Item {
               Text {
                 id: activeText
                 anchors.centerIn: parent
-                text: "󰄬 Active"
-                color: Color.background
+                text: "󰄬 " + root.tr("Active")
+                color: Commons.Color.background
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
@@ -3219,25 +4406,44 @@ Item {
                 Text {
                   id: useLabel
                   anchors.centerIn: parent
-                  text: "Use  ⏎"
-                  color: Color.background
+                  text: root.tr("Use") + "  ⏎"
+                  color: Commons.Color.background
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
                 }
                 MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = cell.index; root.apply() } }
               }
+              // While the design follows the theme, Use picks for the theme that
+              // is on; this picks for all of them and forgets the per-theme picks.
+              Rectangle {
+                visible: root.followTheme
+                width: allLabel.implicitWidth + Style.space(16); height: Style.space(26); radius: 6
+                color: root.shade(0.6)
+                border.width: 1
+                border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.6)
+                Text {
+                  id: allLabel
+                  anchors.centerIn: parent
+                  text: root.tr("All themes") + "  ⇧⏎"
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+                MouseArea { anchors.fill: parent; onClicked: { root.selectedIndex = cell.index; root.apply(true) } }
+              }
               Rectangle {
                 width: custLabel.implicitWidth + Style.space(16); height: Style.space(26); radius: 6
-                color: Qt.rgba(0, 0, 0, 0.6)
+                color: root.shade(0.6)
                 border.width: 1
-                border.color: Qt.rgba(1, 1, 1, 0.25)
+                border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.25)
                 Text {
                   id: custLabel
                   anchors.centerIn: parent
-                  text: cell.modelData.designer ? "Design  E"
-                    : (cell.modelData.path ? "Edit  E" : "Customize  C")
-                  color: "#ffffff"
+                  text: cell.modelData.designer ? root.tr("Design") + "  E"
+                    : (cell.modelData.path ? root.tr("Edit") + "  E" : root.tr("Customize") + "  C")
+                  color: root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -3248,14 +4454,14 @@ Item {
               Rectangle {
                 visible: cell.modelData.path ? true : false
                 width: delLabel.implicitWidth + Style.space(16); height: Style.space(26); radius: 6
-                color: root.confirmingDelete === cell.modelData.id ? "#a54242" : Qt.rgba(0, 0, 0, 0.6)
+                color: root.confirmingDelete === cell.modelData.id ? root.danger : root.shade(0.6)
                 border.width: 1
-                border.color: root.confirmingDelete === cell.modelData.id ? "#c96a6a" : Qt.rgba(1, 1, 1, 0.25)
+                border.color: root.confirmingDelete === cell.modelData.id ? Qt.lighter(root.danger, 1.3) : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.25)
                 Text {
                   id: delLabel
                   anchors.centerIn: parent
-                  text: root.confirmingDelete === cell.modelData.id ? "Sure?  X" : "Delete  X"
-                  color: "#ffffff"
+                  text: root.tr(root.confirmingDelete === cell.modelData.id ? "Sure?" : "Delete") + "  X"
+                  color: root.confirmingDelete === cell.modelData.id ? Commons.Color.background : root.foreground
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -3296,7 +4502,7 @@ Item {
                       anchors.centerIn: parent
                       text: {
                         var cats = Designs.categories()
-                        for (var i = 0; i < cats.length; i++) if (cats[i].id === parent.modelData) return cats[i].name
+                        for (var i = 0; i < cats.length; i++) if (cats[i].id === parent.modelData) return root.tr(cats[i].name)
                         return parent.modelData
                       }
                       textFormat: Text.PlainText
@@ -3310,7 +4516,7 @@ Item {
             }
             Text {
               width: parent.width
-              text: cell.modelData.description + (cell.modelData.credit ? "  ·  clip by " + cell.modelData.credit : "")
+              text: cell.modelData.description + (cell.modelData.credit ? "  ·  " + root.tr("Clip by %1").arg(cell.modelData.credit) : "")
               textFormat: Text.PlainText
               color: root.muted
               font.family: root.fontFamily
@@ -3369,10 +4575,10 @@ Item {
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
           text: {
-            if (root.mainTab === "editor") return "Changes save automatically   ·   Esc: back"
-            if (root.mainTab === "boot") return "Click a card to pick it   ·   Apply writes it to the boot image   ·   B / Esc: back"
-            if (root.mainTab === "settings") return "U / Esc: back"
-            return "Arrows: browse   Space: preview   Enter: select   D: designer   C: customize   E: edit   N: new   X: delete   A: avatar   V: video   S: unlock clip   U: unlock effect   B: boot screen   Esc: close"
+            if (root.mainTab === "editor") return root.tr("Changes save automatically   ·   Esc: back")
+            if (root.mainTab === "boot") return root.tr("Click a card to pick it   ·   Apply writes it to the boot image   ·   B / Esc: back   ·   ?: all keys")
+            if (root.mainTab === "settings") return root.tr("Arrows / PgUp / PgDn: scroll   ·   U / Esc: back   ·   ?: all keys")
+            return root.tr("Arrows: browse   Space: preview   Enter: select   /: search   F: favorite   D: designer   U: settings   ?: all keys   Esc: close")
           }
           color: root.muted
           font.family: root.fontFamily
@@ -3382,7 +4588,7 @@ Item {
     }
 
     BorderSurface {
-      id: editorCard
+      id: editorSurface
       visible: root.editing
       width: root.cardWidth
       height: root.cardHeight
@@ -3395,10 +4601,10 @@ Item {
 
       Item {
         anchors.fill: parent
-        anchors.topMargin: editorCard.contentTopInset + root.contentMargin
-        anchors.bottomMargin: editorCard.contentBottomInset + root.contentMargin
-        anchors.leftMargin: editorCard.contentLeftInset + root.contentMargin
-        anchors.rightMargin: editorCard.contentRightInset + root.contentMargin
+        anchors.topMargin: editorSurface.contentTopInset + root.contentMargin
+        anchors.bottomMargin: editorSurface.contentBottomInset + root.contentMargin
+        anchors.leftMargin: editorSurface.contentLeftInset + root.contentMargin
+        anchors.rightMargin: editorSurface.contentRightInset + root.contentMargin
 
         Item {
           id: editorHeader
@@ -3419,7 +4625,7 @@ Item {
               font.weight: Font.DemiBold
             }
             Text {
-              text: "Custom design"
+              text: root.tr("Custom design")
               color: root.muted
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -3435,8 +4641,8 @@ Item {
               Text {
                 id: saveLabel
                 anchors.centerIn: parent
-                text: "Save  Ctrl+S"
-                color: editorView.dirty ? Color.background : root.foreground
+                text: root.tr("Save  Ctrl+S")
+                color: editorView.dirty ? Commons.Color.background : root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.bold: editorView.dirty
@@ -3449,7 +4655,7 @@ Item {
               Text {
                 id: useLabel2
                 anchors.centerIn: parent
-                text: "Use this design"
+                text: root.tr("Use this design")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -3467,7 +4673,7 @@ Item {
               Text {
                 id: backLabel
                 anchors.centerIn: parent
-                text: "Back  Esc"
+                text: root.tr("Back  Esc")
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -3537,10 +4743,22 @@ Item {
       }
     }
 
+    SidePanel {
+      id: sidePanel
+      explorer: root
+      screenWidth: panel.width
+      screenHeight: panel.height
+      anchors.top: parent.top
+      anchors.bottom: parent.bottom
+      anchors.right: parent.right
+      anchors.margins: Style.gapsOut
+    }
+
     Item {
       anchors.fill: parent
       visible: root.fullPreview
 
+      // Personal fork: the full preview is built only while it is open.
       Loader {
         anchors.fill: parent
         active: root.fullPreview && root.opened
@@ -3548,7 +4766,18 @@ Item {
           anchors.fill: parent
           designId: root.selectedDesign ? root.selectedDesign.id : Designs.DEFAULT_ID
           revision: root.service ? root.service.designsRevision : 0
+          userDesigns: root.userDesigns
           twelveHour: root.twelveHour
+          wallpaperBlur: root.wallpaperBlurValue
+          wallpaperDim: root.wallpaperDimShift
+          uiScale: root.uiScale
+          holdStill: root.motionReduced
+          language: root.lockLanguage
+          fullName: root.accountName
+          showLayoutBadge: root.showLayoutBadge
+          showCapsBadge: root.showCapsBadge
+          allowPasswordToggle: root.allowPasswordToggle
+          showAuthIcons: root.showAuthIcons
           backgroundPath: root.service ? root.service.backgroundPath : ""
           backgroundVersion: root.service ? root.service.backgroundVersion : 0
           fingerprintConfigured: root.service ? root.service.fingerprintConfigured : false
@@ -3585,11 +4814,142 @@ Item {
             font.weight: Font.DemiBold
           }
           Text {
-            text: "Arrows: next   Enter: select   Esc: back"
+            text: root.tr("Arrows: next   Enter: select   Esc: back")
             color: root.muted
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
             anchors.verticalCenter: parent.verticalCenter
+          }
+        }
+      }
+    }
+
+    Item {
+      anchors.fill: parent
+      visible: root.showingKeys
+      z: 100
+
+      Rectangle { anchors.fill: parent; color: root.scrim }
+      MouseArea { anchors.fill: parent; onClicked: root.showingKeys = false }
+
+      BorderSurface {
+        id: keysSheet
+        anchors.centerIn: parent
+        width: keysBody.implicitWidth + contentLeftInset + contentRightInset
+        height: keysBody.implicitHeight + contentTopInset + contentBottomInset
+        radius: root.cornerRadius
+        color: root.background
+        borderSpec: root.borderSpec
+        padding: root.contentMargin
+
+        MouseArea { anchors.fill: parent; onClicked: {} }
+
+        Column {
+          id: keysBody
+          x: keysSheet.contentLeftInset
+          y: keysSheet.contentTopInset
+          spacing: Style.space(24)
+
+          Column {
+            spacing: 3
+            Row {
+              spacing: Style.space(8)
+              Text {
+                text: "::"
+                color: root.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+                font.weight: Font.Bold
+              }
+              Text {
+                text: root.tr("KEYBOARD SHORTCUTS")
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.display
+                font.weight: Font.Bold
+                font.letterSpacing: 2
+              }
+            }
+            Text {
+              text: root.tr("On the design grid") + " · " + root.tr("Esc or ? closes this")
+              color: root.muted
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
+          Grid {
+            columns: 2
+            columnSpacing: Style.space(48)
+            rowSpacing: Style.space(24)
+
+            Repeater {
+              model: root.keySections
+              Column {
+                id: keySection
+                required property var modelData
+                spacing: Style.space(8)
+
+                Text {
+                  text: root.tr(keySection.modelData.title).toUpperCase()
+                  color: root.accent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.weight: Font.DemiBold
+                  font.letterSpacing: 1.5
+                }
+
+                Repeater {
+                  model: keySection.modelData.rows
+                  Row {
+                    id: keyRow
+                    required property var modelData
+                    spacing: Style.space(12)
+
+                    Item {
+                      width: root.keyCapsWidth
+                      height: Style.space(22)
+                      Row {
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(4)
+                        onImplicitWidthChanged: root.keyCapsWidth = Math.max(root.keyCapsWidth, implicitWidth)
+                        Repeater {
+                          model: keyRow.modelData.keys
+                          Rectangle {
+                            id: keyCap
+                            required property var modelData
+                            width: Math.max(Style.space(22), capLabel.implicitWidth + Style.space(12))
+                            height: Style.space(22)
+                            radius: root.cornerRadius
+                            color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
+                            border.width: 1
+                            border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+                            Text {
+                              id: capLabel
+                              anchors.centerIn: parent
+                              text: keyCap.modelData
+                              textFormat: Text.PlainText
+                              color: root.foreground
+                              font.family: root.fontFamily
+                              font.pixelSize: Style.font.caption
+                            }
+                          }
+                        }
+                      }
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: root.tr(keyRow.modelData.text)
+                      textFormat: Text.PlainText
+                      color: root.foreground
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                  }
+                }
+              }
+            }
           }
         }
       }

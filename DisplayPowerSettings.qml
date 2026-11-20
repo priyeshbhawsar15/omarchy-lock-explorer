@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import qs.Commons
+import "designs"
 
 Column {
   id: root
@@ -60,7 +61,9 @@ Column {
           color: Color.background
           border.width: 1
           border.color: timeoutInput.activeFocus ? Color.accent : Color.muted
-          TextInput {
+          // Read-only and typed through its own key handler: a writable
+          // TextInput reads the whole clipboard on every change (QTBUG-149610).
+          TypedInput {
             id: timeoutInput
             objectName: group.modelData.timeout
             anchors.fill: parent
@@ -75,10 +78,12 @@ Column {
             selectByMouse: true
             validator: IntValidator { bottom: 1; top: 3600 }
             Accessible.name: group.modelData.group + " timeout in seconds"
-            onEditingFinished: {
+            function commit() {
               if (acceptableInput) root.settingEdited(group.modelData.timeout, Number(text) * 1000)
               text = Qt.binding(function() { return String(Math.round(root.settings[group.modelData.timeout] / 1000)) })
             }
+            onAccepted: commit()
+            onActiveFocusChanged: if (!activeFocus) commit()
           }
         }
         Text {

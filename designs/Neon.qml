@@ -1,14 +1,15 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 
 DesignBase {
   id: lock
   inputItem: field.input
 
-  readonly property color glow: errorState ? Color.lock.textError : Color.lock.borderActive
+  readonly property color glow: errorState ? Commons.Color.lock.textError : Commons.Color.lock.borderActive
 
-  Rectangle { anchors.fill: parent; color: Qt.darker(Color.background, 1.35) }
+  Rectangle { anchors.fill: parent; color: Qt.darker(Commons.Color.background, 1.35) }
 
   Canvas {
     anchors.fill: parent
@@ -54,7 +55,7 @@ DesignBase {
     Text {
       anchors.horizontalCenter: parent.horizontalCenter
       text: lock.clock("HH:mm")
-      color: Color.lock.borderActive
+      color: Commons.Color.lock.borderActive
       font.family: Style.font.family
       font.pixelSize: Math.round(Style.font.baseSize * 11)
       font.weight: Font.Bold
@@ -62,7 +63,7 @@ DesignBase {
       layer.enabled: true
       layer.effect: MultiEffect {
         shadowEnabled: true
-        shadowColor: Color.lock.borderActive
+        shadowColor: Commons.Color.lock.borderActive
         shadowBlur: 1.0
         shadowScale: 1.04
         shadowOpacity: 0.9
@@ -71,13 +72,13 @@ DesignBase {
 
     Text {
       anchors.horizontalCenter: parent.horizontalCenter
-      text: Qt.formatDate(lock.now, "dddd  ·  d MMMM").toUpperCase()
-      color: Color.lock.text
+      text: lock.date("dddd  ·  d MMMM").toUpperCase()
+      color: Commons.Color.lock.text
       font.family: Style.font.family
       font.pixelSize: Style.font.title
       font.letterSpacing: 6
       layer.enabled: true
-      layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Color.lock.text; shadowBlur: 0.6; shadowOpacity: 0.5 }
+      layer.effect: MultiEffect { shadowEnabled: true; shadowColor: Commons.Color.lock.text; shadowBlur: 0.6; shadowOpacity: 0.5 }
     }
 
     Item {
@@ -94,7 +95,7 @@ DesignBase {
         radius: 27
         showLockGlyph: false
         color: Qt.rgba(0, 0, 0, 0.55)
-        placeholder: lock.userName
+        placeholder: lock.displayName
       }
     }
   }
@@ -103,8 +104,9 @@ DesignBase {
     anchors.bottom: parent.bottom
     anchors.bottomMargin: 36
     anchors.horizontalCenter: parent.horizontalCenter
-    text: lock.fingerprintConfigured ? "TOUCH SENSOR OR TYPE PASSWORD" : "TYPE PASSWORD  ·  ENTER TO UNLOCK"
-    color: lock.withAlpha(Color.lock.text, 0.45)
+    text: lock.fingerprintConfigured ? lock.fingerprintHint(lock.tr("TOUCH SENSOR OR TYPE PASSWORD")).toUpperCase() : lock.tr("TYPE PASSWORD  ·  ENTER TO UNLOCK")
+    textFormat: Text.PlainText
+    color: lock.withAlpha(Commons.Color.lock.text, 0.45)
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
     font.letterSpacing: 4

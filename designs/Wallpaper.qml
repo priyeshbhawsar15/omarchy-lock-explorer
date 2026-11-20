@@ -1,9 +1,7 @@
 import QtQuick
 import QtQuick.Effects
-import QtMultimedia
-import Quickshell
 import qs.Commons
-import "../WallpaperSpan.js" as WallpaperSpan
+import qs.Commons as Commons
 
 Item {
   id: wall
@@ -17,96 +15,116 @@ Item {
   property real vignetteMiddle: 0.10
   property real vignetteBottom: 0.45
 
-  readonly property string videoUrl: lock && lock.videoUrl ? lock.videoUrl : ""
-  readonly property bool wants: (lock && lock.videoPlaying !== undefined ? lock.videoPlaying : true) && visible && videoUrl.length > 0 && !failed
-  property bool failed: false
-  readonly property bool showing: player.hasVideo && (player.playbackState === MediaPlayer.PlayingState || player.playbackState === MediaPlayer.PausedState)
+  // What is drawn: the design's blur and dim, as the wallpaper setting on the
+  // lock (see DesignBase) adjusts them.
+  readonly property real shownBlur: wall.lock && wall.lock.wallpaperBlur !== undefined && wall.lock.wallpaperBlur >= 0
+                                    ? wall.lock.wallpaperBlur : wall.blur
+  readonly property real shownDim: Math.max(0, Math.min(0.9, wall.dim
+                                   + (wall.lock && wall.lock.wallpaperDim !== undefined ? wall.lock.wallpaperDim : 0)))
 
-  readonly property string screenName: lock && lock.screenName ? String(lock.screenName) : ""
-  readonly property var viewport: WallpaperSpan.viewport(screenName,
-    Quickshell.screens.map(function(s) {
-      return { name: s.name, x: s.x, y: s.y, width: s.width, height: s.height }
-    }), lock ? lock.wallpaperSpanGroups : [])
+  // Personal fork: every design plays the active video wallpaper (spanned
+  // across lock.wallpaperSpanGroups) over the still picture. The player lives
+  // in SpanVideo.qml and is built only while this item's window is mapped, so
+  // unmapped previews and lock surfaces don't keep a decoder (and dGPU) awake.
+  readonly property string videoUrl: lock && lock.videoUrl ? lock.videoUrl : ""
+  property bool failed: false
+  readonly property bool mapped: visible && Window.window !== null && Window.window.visible
+  readonly property bool wants: (lock && lock.videoPlaying !== undefined ? lock.videoPlaying : true)
+                                && visible && videoUrl.length > 0 && !failed
+  readonly property bool showing: videoLoader.item ? videoLoader.item.showing : false
+  onVideoUrlChanged: failed = false
 
   Rectangle {
     anchors.fill: parent
-    color: Color.background
+    color: Commons.Color.background
   }
 
-  Image {
-    id: image
+  // A new wallpaper (a theme change) fades in over the one before instead of
+  // leaving an empty frame while it decodes: the last picture that finished
+  // loading stays underneath until the new one has faded in.
+  property string heldUrl: ""
+  readonly property bool anyReady: image.status === Image.Ready || held.status === Image.Ready
+
+  Item {
+    id: stack
     anchors.fill: parent
-    source: (wall.lock && wall.lock.loadBackground) ? wall.lock.fileUrl(wall.lock.backgroundPath) : ""
-    fillMode: Image.PreserveAspectCrop
-    asynchronous: true
-    // The url ends in ?v=backgroundVersion, so a new wallpaper is a new url and
-    // this cannot serve a stale one. Sharing it matters in the explorer, where
-    // every preview would otherwise decode the same file on its own.
-    cache: true
-    sourceSize.width: width
-    sourceSize.height: height
-    visible: wall.blur <= 0 && !wall.showing
+    visible: wall.shownBlur <= 0 && !wall.showing
+
+    Image {
+      id: held
+      anchors.fill: parent
+      source: wall.heldUrl
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      cache: true
+      sourceSize.width: width
+      sourceSize.height: height
+    }
+
+    Image {
+      id: image
+      anchors.fill: parent
+      source: (wall.lock && wall.lock.loadBackground) ? wall.lock.fileUrl(wall.lock.backgroundPath) : ""
+      fillMode: Image.PreserveAspectCrop
+      asynchronous: true
+      // The url ends in ?v=backgroundVersion, so a new wallpaper is a new url and
+      // this cannot serve a stale one. Sharing it matters in the explorer, where
+      // every preview would otherwise decode the same file on its own.
+      cache: true
+      sourceSize.width: width
+      sourceSize.height: height
+      opacity: status === Image.Ready ? 1 : 0
+      Behavior on opacity { NumberAnimation { duration: wall.heldUrl.length > 0 ? 300 : 0 } }
+      onStatusChanged: if (status === Image.Ready) heldTimer.restart()
+    }
+
+    Timer {
+      id: heldTimer
+      interval: 320
+      onTriggered: wall.heldUrl = String(image.source)
+    }
   }
 
   MultiEffect {
-    anchors.fill: image
-    source: image
-    // Hidden until the image decodes: with a broken wallpaper (e.g. WebP
+    anchors.fill: stack
+    source: stack
+    // Hidden until a picture has decoded: with a broken wallpaper (e.g. WebP
     // without qt6-imageformats) the effect paints its empty source as solid
     // black, hiding the theme-color fallback underneath.
-    visible: wall.blur > 0 && image.status === Image.Ready && !wall.showing
+    visible: wall.shownBlur > 0 && wall.anyReady && !wall.showing
     autoPaddingEnabled: false
-    blurEnabled: wall.blur > 0 && image.status === Image.Ready
-    blur: wall.blur
+    blurEnabled: wall.shownBlur > 0 && wall.anyReady
+    blur: wall.shownBlur
     blurMax: 96
     blurMultiplier: 1.25
     contrast: wall.contrast
-    brightness: -wall.dim
+    brightness: -wall.shownDim
   }
 
-  MediaPlayer {
-    id: player
-    source: wall.videoUrl
-    videoOutput: output
-    loops: MediaPlayer.Infinite
-    onSourceChanged: { wall.failed = false; wall.sync() }
-    onErrorOccurred: function(error, errorString) {
-      wall.failed = true
-      console.warn("lock-explorer: cannot play", wall.videoUrl, errorString)
-    }
-  }
-
-  Item {
-    id: videoContainer
+  Loader {
+    id: videoLoader
     anchors.fill: parent
-    clip: true
-    visible: wall.wants
-    opacity: wall.showing ? 1 : 0
-    Behavior on opacity { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
-
-    VideoOutput {
-      id: output
-      width: parent.width * wall.viewport.width
-      height: parent.height * wall.viewport.height
-      x: parent.width * wall.viewport.x
-      y: parent.height * wall.viewport.y
-      fillMode: VideoOutput.PreserveAspectCrop
+    active: wall.mapped && wall.videoUrl.length > 0 && !wall.failed
+    source: Qt.resolvedUrl("SpanVideo.qml")
+    onLoaded: {
+      item.lock = Qt.binding(function() { return wall.lock })
+      item.videoUrl = Qt.binding(function() { return wall.videoUrl })
+      item.wants = Qt.binding(function() { return wall.wants })
     }
+    // Without QtMultimedia the component cannot build; keep the still picture.
+    onStatusChanged: if (status === Loader.Error) wall.failed = true
   }
 
-  function sync() {
-    if (wants) player.play()
-    else player.pause()
+  Connections {
+    target: videoLoader.item
+    function onPlaybackFailed() { wall.failed = true }
   }
-
-  onWantsChanged: sync()
-  Component.onCompleted: sync()
 
   Rectangle {
     anchors.fill: parent
     color: "black"
     visible: wall.showing
-    opacity: wall.dim
+    opacity: wall.shownDim
   }
 
   Rectangle {

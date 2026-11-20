@@ -1,7 +1,9 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Bounded.js" as Bounded
 import qs.Commons
+import qs.Commons as Commons
 
 DesignBase {
   id: lock
@@ -15,7 +17,7 @@ DesignBase {
   readonly property var current: report && report.current_condition && report.current_condition.length ? report.current_condition[0] : null
   readonly property string temp: current ? current.temp_C + "°" : "--"
   readonly property string feels: current ? current.FeelsLikeC + "°" : ""
-  readonly property string desc: current && current.weatherDesc && current.weatherDesc.length ? current.weatherDesc[0].value : (loading ? "Loading weather" : (error || "No weather"))
+  readonly property string desc: current && current.weatherDesc && current.weatherDesc.length ? current.weatherDesc[0].value : (loading ? lock.tr("Loading weather") : (error || lock.tr("No weather")))
   readonly property string area: report && report.nearest_area && report.nearest_area.length && report.nearest_area[0].areaName ? report.nearest_area[0].areaName[0].value : ""
   readonly property var days: report && report.weather ? report.weather.slice(0, 3) : []
 
@@ -51,9 +53,9 @@ DesignBase {
   // bounds the wait, this bounds the memory.
   readonly property int responseCap: 262144
 
-  FileView {
+  CappedFile {
     path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/weather.json"
-    printErrors: false
+    maxBytes: 65536
     onLoaded: {
       try {
         var d = JSON.parse(text())
@@ -69,9 +71,9 @@ DesignBase {
   Process {
     id: weatherProc
     // The URL and the cap travel as arguments, never inside the script text.
-    command: ["bash", "-c",
+    command: Bounded.run(["bash", "-c",
       "set -o pipefail; curl -fsS --max-time 15 --max-filesize \"$2\" \"$1\" | head -c \"$2\"",
-      "wttr", "https://wttr.in/" + lock.locationQuery + "?format=j1", String(lock.responseCap)]
+      "wttr", "https://wttr.in/" + lock.locationQuery + "?format=j1", String(lock.responseCap)], { deadline: 60, cap: 1048576 })
     stdout: StdioCollector {
       id: weatherOut
       waitForEnd: true
@@ -88,7 +90,7 @@ DesignBase {
       if (ok) {
         lock.error = ""
       } else {
-        lock.error = "Weather unavailable"
+        lock.error = lock.tr("Weather unavailable")
         if (!lock.retried) { lock.retried = true; retryTimer.start() }
       }
       lock.loading = false
@@ -126,7 +128,7 @@ DesignBase {
         Text {
           anchors.verticalCenter: parent.verticalCenter
           text: lock.current ? lock.glyph(lock.current.weatherCode) : "󰖐"
-          color: Color.lock.borderActive
+          color: Commons.Color.lock.borderActive
           font.family: Style.font.family
           font.pixelSize: Math.round(Style.font.baseSize * 7)
         }
@@ -134,7 +136,7 @@ DesignBase {
           anchors.verticalCenter: parent.verticalCenter
           text: lock.temp
           textFormat: Text.PlainText
-          color: Color.lock.text
+          color: Commons.Color.lock.text
           font.family: Style.font.family
           font.pixelSize: Math.round(Style.font.baseSize * 8)
           font.weight: Font.DemiBold
@@ -144,14 +146,14 @@ DesignBase {
       Text {
         text: lock.desc
         textFormat: Text.PlainText
-        color: Color.lock.text
+        color: Commons.Color.lock.text
         font.family: Style.font.family
         font.pixelSize: Style.font.display
       }
       Text {
         text: (lock.area ? lock.area + "  ·  " : "") + (lock.current ? "feels like " + lock.feels + "  ·  " + lock.current.humidity + "% humidity  ·  " + lock.current.windspeedKmph + " km/h" : "")
         textFormat: Text.PlainText
-        color: lock.withAlpha(Color.lock.text, 0.65)
+        color: lock.withAlpha(Commons.Color.lock.text, 0.65)
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
@@ -164,23 +166,23 @@ DesignBase {
             required property var modelData
             required property int index
             width: 96; height: 92; radius: 12
-            color: lock.withAlpha(Color.lock.background, 0.55)
+            color: lock.withAlpha(Commons.Color.lock.background, 0.55)
             border.width: 1
-            border.color: lock.withAlpha(Color.lock.text, 0.1)
+            border.color: lock.withAlpha(Commons.Color.lock.text, 0.1)
             Column {
               anchors.centerIn: parent
               spacing: 2
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
-                text: parent.parent.index === 0 ? "Today" : Qt.formatDate(new Date(parent.parent.modelData.date), "ddd")
-                color: lock.withAlpha(Color.lock.text, 0.6)
+                text: parent.parent.index === 0 ? lock.tr("Today") : lock.date("ddd", new Date(parent.parent.modelData.date))
+                color: lock.withAlpha(Commons.Color.lock.text, 0.6)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
               Text {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: lock.dayGlyph(parent.parent.modelData)
-                color: Color.lock.borderActive
+                color: Commons.Color.lock.borderActive
                 font.family: Style.font.family
                 font.pixelSize: Style.font.display
               }
@@ -188,7 +190,7 @@ DesignBase {
                 anchors.horizontalCenter: parent.horizontalCenter
                 text: parent.parent.modelData.maxtempC + "° / " + parent.parent.modelData.mintempC + "°"
                 textFormat: Text.PlainText
-                color: Color.lock.text
+                color: Commons.Color.lock.text
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -198,22 +200,22 @@ DesignBase {
       }
     }
 
-    Rectangle { width: 1; height: 220; color: lock.withAlpha(Color.lock.text, 0.2); anchors.verticalCenter: parent.verticalCenter }
+    Rectangle { width: 1; height: 220; color: lock.withAlpha(Commons.Color.lock.text, 0.2); anchors.verticalCenter: parent.verticalCenter }
 
     Column {
       anchors.verticalCenter: parent.verticalCenter
       spacing: 6
       Text {
         text: lock.clock("HH:mm")
-        color: Color.lock.text
+        color: Commons.Color.lock.text
         font.family: Style.font.family
         font.pixelSize: Math.round(Style.font.baseSize * 8)
         font.weight: Font.DemiBold
         font.letterSpacing: -2
       }
       Text {
-        text: Qt.formatDate(lock.now, "dddd, d MMMM")
-        color: lock.withAlpha(Color.lock.text, 0.75)
+        text: lock.date("dddd, d MMMM")
+        color: lock.withAlpha(Commons.Color.lock.text, 0.75)
         font.family: Style.font.family
         font.pixelSize: Style.font.display
       }
@@ -228,6 +230,6 @@ DesignBase {
     anchors.bottomMargin: Math.round(parent.height * 0.16)
     width: 400
     height: 54
-    placeholder: lock.greeting() + ", " + lock.userName
+    placeholder: lock.greeting() + ", " + lock.displayName
   }
 }

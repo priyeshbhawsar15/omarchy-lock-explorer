@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Effects
 import qs.Commons
+import qs.Commons as Commons
 
 DesignBase {
   id: lock
@@ -23,10 +24,11 @@ DesignBase {
     anchors.top: parent.top
     anchors.margins: lock.margin
     spacing: 12
-    Rectangle { width: 10; height: 10; radius: 5; color: Color.lock.borderActive; anchors.verticalCenter: parent.verticalCenter }
+    Rectangle { width: 10; height: 10; radius: 5; color: Commons.Color.lock.borderActive; anchors.verticalCenter: parent.verticalCenter }
     Text {
-      text: lock.hostName.toUpperCase() + "  ·  " + lock.userName
-      color: lock.withAlpha(Color.lock.text, 0.75)
+      text: lock.hostName.toUpperCase() + "  ·  " + lock.displayName
+      textFormat: Text.PlainText
+      color: lock.withAlpha(Commons.Color.lock.text, 0.75)
       font.family: Style.font.family
       font.pixelSize: Style.font.subtitle
       font.letterSpacing: 3
@@ -38,8 +40,9 @@ DesignBase {
     anchors.top: parent.top
     anchors.margins: lock.margin
     opacity: lock.snapshotMode ? 0 : 1
-    text: lock.fingerprintConfigured ? "󰆠  FINGERPRINT READY" : "󰌾  LOCKED"
-    color: lock.withAlpha(Color.lock.text, 0.75)
+    text: lock.fingerprintConfigured ? lock.fingerprintHint(lock.tr("󰆠  FINGERPRINT READY")).toUpperCase() : lock.tr("󰌾  LOCKED")
+    textFormat: Text.PlainText
+    color: lock.withAlpha(Commons.Color.lock.text, 0.75)
     font.family: Style.font.family
     font.pixelSize: Style.font.subtitle
     font.letterSpacing: 3
@@ -54,8 +57,12 @@ DesignBase {
     spacing: 18
 
     Text {
+      // A snapshot is a static boot image: with the boot clock set to Hide
+      // the frozen time stays off it. `visible` (not opacity) lets the
+      // column collapse so the measured field geometry matches the live lock.
+      visible: !lock.hideTime
       text: lock.clock("HH:mm")
-      color: Color.lock.text
+      color: Commons.Color.lock.text
       font.family: Style.font.family
       font.pixelSize: Math.round(Style.font.baseSize * 15)
       font.weight: Font.Bold
@@ -66,21 +73,22 @@ DesignBase {
     }
 
     Row {
+      visible: !lock.hideTime
       spacing: 14
-      Rectangle { width: 4; height: dateCol.implicitHeight; color: Color.lock.borderActive; radius: 2 }
+      Rectangle { width: 4; height: dateCol.implicitHeight; color: Commons.Color.lock.borderActive; radius: 2 }
       Column {
         id: dateCol
         spacing: 2
         Text {
-          text: Qt.formatDate(lock.now, "dddd")
-          color: Color.lock.text
+          text: lock.date("dddd")
+          color: Commons.Color.lock.text
           font.family: Style.font.family
           font.pixelSize: Style.font.displayLarge
           font.weight: Font.DemiBold
         }
         Text {
-          text: Qt.formatDate(lock.now, "d MMMM yyyy")
-          color: lock.withAlpha(Color.lock.text, 0.75)
+          text: lock.date("d MMMM yyyy")
+          color: lock.withAlpha(Commons.Color.lock.text, 0.75)
           font.family: Style.font.family
           font.pixelSize: Style.font.heading
           font.letterSpacing: 1
@@ -96,16 +104,16 @@ DesignBase {
       width: lock.fieldWidth
       height: 56
       textAlignment: TextInput.AlignLeft
-      placeholder: "Password"
-      color: lock.withAlpha(Color.lock.background, 0.75)
+      placeholder: lock.tr("Password")
+      color: lock.withAlpha(Commons.Color.lock.background, 0.75)
     }
 
     Text {
       opacity: lock.snapshotMode ? 0 : 1
       text: lock.failedAttempts > 0
-        ? lock.failedAttempts + " failed " + (lock.failedAttempts === 1 ? "attempt" : "attempts")
-        : "Enter to unlock  ·  Esc to clear"
-      color: lock.failedAttempts > 0 ? Color.lock.textError : lock.withAlpha(Color.lock.text, 0.55)
+        ? lock.tr(lock.failedAttempts === 1 ? "1 failed attempt" : "%1 failed attempts").arg(lock.failedAttempts)
+        : lock.tr("Enter to unlock  ·  Esc to clear")
+      color: lock.failedAttempts > 0 ? Commons.Color.lock.textError : lock.withAlpha(Commons.Color.lock.text, 0.55)
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
       font.letterSpacing: 1

@@ -12,22 +12,15 @@ source "$(dirname "$(realpath "$0")")/../common.sh"
 staging="${1:?usage: generate.sh <staging-dir> <layout.conf> [id]}"
 conf="${2:?missing layout.conf}"
 id="${3:-custom:$(basename "$conf" .conf)}"
+# The id is written into the generated script and the state file.
+[[ $id =~ ^[A-Za-z0-9:._-]{1,80}$ ]] || { echo "Refusing design id: $id" >&2; exit 1; }
 
 [[ -f $conf ]] || { echo "No such layout: $conf" >&2; exit 1; }
 mkdir -p "$staging"
 
-conf_get() {
-  awk -F= -v k="$1" '
-    /^[ \t]*#/ { next }
-    {
-      key = $1; gsub(/^[ \t]+|[ \t]+$/, "", key)
-      if (key == k) {
-        sub(/^[^=]*=/, ""); gsub(/^[ \t]+|[ \t]+$/, "")
-        print; exit
-      }
-    }' "$conf"
-}
-val() { local v; v=$(conf_get "$1"); printf '%s' "${v:-$2}"; }
+# Every key through layout_val (common.sh): the values reach generated
+# Plymouth script, magick arguments and shell arithmetic below.
+val() { layout_val "$conf" "$1" "$2"; }
 
 bg_t=$(theme_color background); fg_t=$(theme_color foreground)
 accent_t=$(theme_color accent blue); [[ -n $accent_t ]] || accent_t=$fg_t
@@ -54,9 +47,9 @@ background=$(val background theme)
 background_plain=$(val background_plain "")
 scanlines=$(val scanlines off)
 logo=$(val logo none);            logo_y=$(val logo_y 36);        logo_h=$(val logo_height 120)
-title=$(expand_vars "$(val title "")");        title_y=$(val title_y 18)
+title=$(layout_text "$(expand_vars "$(val title "")")");        title_y=$(val title_y 18)
 title_size=$(val title_size 26);  title_c=$(resolve_color "$(val title_color foreground)")
-subtitle=$(expand_vars "$(val subtitle "")");  subtitle_y=$(val subtitle_y 26)
+subtitle=$(layout_text "$(expand_vars "$(val subtitle "")")");  subtitle_y=$(val subtitle_y 26)
 subtitle_size=$(val subtitle_size 15); subtitle_c=$(resolve_color "$(val subtitle_color dim)")
 entry=$(val entry pill);          entry_y=$(val entry_y 72);      entry_w=$(val entry_width 380)
 # "embedded" entry: the input box is part of the background image (a design
@@ -64,7 +57,7 @@ entry=$(val entry pill);          entry_y=$(val entry_y 72);      entry_w=$(val 
 # aligned the way the design aligns its own dots.
 entry_x=$(val entry_x 50);        entry_wp=$(val entry_wp 0);     entry_hp=$(val entry_hp 0)
 entry_align=$(val entry_align center)
-hint=$(expand_vars "$(val hint "")")
+hint=$(layout_text "$(expand_vars "$(val hint "")")")
 
 accent_i=$(hex_ints "$accent_t"); bg_i=$(hex_ints "$bg_t")
 fg_f=$(hex_floats "$fg_t"); dim_f=$(hex_floats "$dim_t"); bg_f=$(hex_floats "$bg_t")
@@ -81,8 +74,10 @@ case "$background" in
   theme) : ;;
   wallpaper)
     link="$HOME/.local/state/omarchy/current/background"
-    if [[ -e $link ]]; then
-      magick "$(readlink -f "$link")" -resize 1920x1080^ -gravity center -extent 1920x1080 \
+    # Every user image goes in through image_in (common.sh): decoded as what
+    # its own signature says it is, and skipped when that is not an image.
+    if [[ -e $link ]] && src=$(image_in "$(readlink -f "$link")"); then
+      magick "$src" -resize 1920x1080^ -gravity center -extent 1920x1080 \
         -blur 0x12 -fill black -colorize 40 "$staging/bg.png"
     fi ;;
   '#'*) magick -size 64x64 "xc:$background" "$staging/bg.png" ;;
@@ -91,18 +86,50 @@ case "$background" in
   # Split puts its input box near the right edge -- so a file background keeps
   # its aspect ratio and the script fits it to the framebuffer instead. '>'
   # only ever shrinks, so only an oversized image is touched.
-  *) [[ -f $background ]] && magick "$background" -resize "${canvas_max}>" "$staging/bg.png" ;;
+  *) if src=$(image_in "$background"); then magick "$src" -resize "${canvas_max}>" "$staging/bg.png"; fi ;;
 esac
 
-[[ -n $background_plain && -f $background_plain ]] &&
-  magick "$background_plain" -resize "${canvas_max}>" "$staging/bg-plain.png"
+if [[ -n $background_plain ]] && src=$(image_in "$background_plain"); then
+  magick "$src" -resize "${canvas_max}>" "$staging/bg-plain.png"
+fi
+
+# The same design captured at the other monitor sizes (a snapshot taken on a
+# multi-monitor setup, see apply.sh): <background>@WxH.png next to the main
+# one, each with its own input box rect. A design lays itself out for the
+# size it is rendered at, so a 21:9 capture fitted onto a 16:9 head is the
+# wrong composition, banded top and bottom (issue #38); the script below
+# gives each head the capture whose shape is closest to its own. A variant
+# goes in only with the same plain/boxed pair the main capture has.
+variants=$(val variants "")
+v_keys=(); v_iw=(); v_ih=(); v_ex=(); v_ey=(); v_ew=(); v_eh=()
+if [[ -n $variants && $entry == embedded && $background == /*.png && -f $staging/bg.png ]]; then
+  IFS=';' read -ra vlist <<< "$variants"
+  for v in "${vlist[@]}"; do
+    IFS=, read -r vkey vex vey vew veh <<< "$v"
+    vsrc="${background%.png}@$vkey.png"
+    src=$(image_in "$vsrc") || continue
+    magick "$src" -resize "${canvas_max}>" "$staging/bg-$vkey.png"
+    if [[ -f $staging/bg-plain.png ]]; then
+      vplain="${background%.png}@$vkey-plain.png"
+      if [[ -f $vplain && $vplain -nt $vsrc ]] && psrc=$(image_in "$vplain"); then
+        magick "$psrc" -resize "${canvas_max}>" "$staging/bg-plain-$vkey.png"
+      else
+        rm -f "$staging/bg-$vkey.png"; continue
+      fi
+    fi
+    vsize=$(magick identify -format '%w %h' "$staging/bg-$vkey.png[0]")
+    v_keys+=("$vkey"); v_iw+=("${vsize% *}"); v_ih+=("${vsize#* }")
+    v_ex+=("$vex"); v_ey+=("$vey"); v_ew+=("$vew"); v_eh+=("$veh")
+  done
+fi
 
 [[ $scanlines == on ]] && magick -size 8x3 xc:none -fill 'rgba(0,0,0,0.12)' -draw 'rectangle 0,2 7,2' "$staging/scanline.png"
 
 case "$logo" in
   none) : ;;
-  theme) [[ -f "$HOME/.local/state/omarchy/current/theme/unlock.png" ]] && cp "$HOME/.local/state/omarchy/current/theme/unlock.png" "$staging/logo.png" ;;
-  *) [[ -f $logo ]] && cp "$logo" "$staging/logo.png" ;;
+  theme) if src=$(image_in "$HOME/.local/state/omarchy/current/theme/unlock.png"); then magick "${src}[0]" "png:$staging/logo.png"; fi ;;
+  # Re-encoded, never copied: root takes only real PNG files in a theme.
+  *) if src=$(image_in "$logo"); then magick "${src}[0]" "png:$staging/logo.png"; fi ;;
 esac
 
 case "$entry" in
@@ -117,10 +144,13 @@ if [[ $entry != none ]]; then
   fg_i=$(hex_ints "$fg_t")
   # Loading: a rotating arc, clearly distinct from the passphrase bullets.
   # Pre-rendered frames -- text and font rendering die after switch_root.
+  # Drawn at 96 px and scaled by the script to the entry it replaces, so it
+  # stays in proportion on a 4K framebuffer instead of shrinking to a speck:
+  # the old 22 px arc's geometry, scaled up (radius 8 -> 35, stroke 3 -> 13).
   for i in $(seq 1 12); do
     a=$(( (i - 1) * 30 ))
-    magick -size 22x22 xc:none -stroke "rgba($fg_i,0.95)" -strokewidth 3 -fill none \
-      -draw "ellipse 11,11 8,8 $a,$((a + 120))" "$staging/spin$i.png"
+    magick -size 96x96 xc:none -stroke "rgba($fg_i,0.95)" -strokewidth 13 -fill none \
+      -draw "ellipse 48,48 35,35 $a,$((a + 120))" "$staging/spin$i.png"
   done
   # One passphrase bullet; the script draws one sprite per typed character,
   # so the row aligns exactly inside the entry box.
@@ -167,6 +197,15 @@ if [[ -n $bg_has_box ]]; then
   bg_rehide="bg_idle();"
 fi
 hint_show=""
+# Reboot and shutdown run this theme too. By default they keep the design up
+# (its box-free capture, where there is one); BOOT_SHUTDOWN=plain, the
+# explorer's Reboot & shutdown setting, hides every part of the design on the
+# way down and leaves the theme's background colour (issue #76).
+case "${BOOT_SHUTDOWN:-design}" in
+  plain)  show_design_gate=$(emit_downward_gate show_design) ;;
+  design) show_design_gate="global.show_design = 1;" ;;
+  *)      echo "Refusing BOOT_SHUTDOWN: $BOOT_SHUTDOWN" >&2; exit 1 ;;
+esac
 [[ -n $hint && $entry != none ]] && hint_show="hint.sprite.SetOpacity(1);"
 
 # ------------------------------------------------ plymouth script
@@ -174,14 +213,72 @@ hint_show=""
 cat <<EOF
 # Custom boot layout ($id), generated by omarchy-lock-explorer.
 
+$show_design_gate
+
 fg.r = ${fg_f%%,*}; fg.g = $(echo "$fg_f" | cut -d, -f2); fg.b = $(echo "$fg_f" | cut -d, -f3);
 dim.r = ${dim_f%%,*}; dim.g = $(echo "$dim_f" | cut -d, -f2); dim.b = $(echo "$dim_f" | cut -d, -f3);
 
 Window.SetBackgroundTopColor(${bg_f});
 Window.SetBackgroundBottomColor(${bg_f});
 
-screen.w = Window.GetWidth();
-screen.h = Window.GetHeight();
+# Plymouth composites one canvas and every head shows its own slice of it, so
+# a layout built from a single Window.GetWidth() lands wrong on any head of a
+# different size: on a wider one it is cropped, on a narrower one it sits off
+# to the side (issue #38). Each head is measured separately here, and the
+# background below is drawn once per head, at that head's own origin.
+# Plymouth centres every head on the widest one, so their slices overlap and
+# any sprite shows on each head it touches: a copy sized for one head covered
+# the other's too. Each head is moved to a slice of its own, far enough apart
+# that a background filled past one head's edges never reaches the next.
+display_count = 0;
+next_x = 0;
+i = 0;
+while (i < 8) {
+  dw = Window.GetWidth(i);
+  dh = Window.GetHeight(i);
+  if (dw > 0) {
+    Window.SetX(i, next_x);
+    Window.SetY(i, 0);
+    dsp_i[display_count] = i;
+    dsp_x[display_count] = next_x;
+    dsp_y[display_count] = 0;
+    dsp_w[display_count] = dw;
+    dsp_h[display_count] = dh;
+    display_count++;
+    next_x = next_x + dw + 32768;
+  }
+  i++;
+}
+moved_count = display_count;
+# An older plymouth that does not take a display index answers for the one
+# screen it has; that is the single-head case and it still works.
+if (display_count == 0) {
+  dsp_x[0] = 0;
+  dsp_y[0] = 0;
+  dsp_w[0] = Window.GetWidth();
+  dsp_h[0] = Window.GetHeight();
+  display_count = 1;
+}
+
+# Plymouth centres the heads on each other again after every prompt, message
+# and keystroke (script_lib_update_displays in plugin.c), which would pull the
+# layout above back into the overlap. The refresh puts each head back in its
+# slice; Window.SetX/SetY only redraw when a position actually changes.
+fun place_heads() {
+  d = 0;
+  while (d < moved_count) {
+    Window.SetX(dsp_i[d], dsp_x[d]);
+    Window.SetY(dsp_i[d], dsp_y[d]);
+    d++;
+  }
+}
+
+# The prompt, the logo and the hint live on the first head; the others carry
+# the background alone.
+screen.x = dsp_x[0];
+screen.y = dsp_y[0];
+screen.w = dsp_w[0];
+screen.h = dsp_h[0];
 EOF
 
 # Where the background gets drawn. One scale factor for both axes, and the
@@ -193,14 +290,69 @@ EOF
 # Captures are taken at the display's own geometry, so this is normally an
 # identity transform; it earns its keep when Plymouth comes up on a mode the
 # session was not using.
-[[ -f $staging/bg.png ]] && cat <<EOF
-bg.scale = screen.w / $bg_iw;
-if (screen.h / $bg_ih $bg_fit bg.scale) bg.scale = screen.h / $bg_ih;
-bg.w = $bg_iw * bg.scale;
-bg.h = $bg_ih * bg.scale;
-bg.x = (screen.w - bg.w) / 2;
-bg.y = (screen.h - bg.h) / 2;
+if [[ -f $staging/bg.png ]]; then
+cat <<EOF
+# The captures of the design: 0 is the main one, any others the same design
+# rendered at another monitor size. Head i shows capture hs[i]: one of its
+# exact size, else the one closest to its aspect ratio, so each monitor gets
+# the layout the design makes for its shape (issue #38).
+bg_n = $(( 1 + ${#v_keys[@]} ));
+src_file[0] = "bg.png"; src_plain[0] = "bg-plain.png";
+src_iw[0] = $bg_iw; src_ih[0] = $bg_ih;
+src_ex[0] = $entry_x; src_ey[0] = $entry_y; src_ew[0] = $entry_wp; src_eh[0] = $entry_hp;
 EOF
+for n in "${!v_keys[@]}"; do
+  k=$((n + 1))
+  cat <<EOF
+src_file[$k] = "bg-${v_keys[n]}.png"; src_plain[$k] = "bg-plain-${v_keys[n]}.png";
+src_iw[$k] = ${v_iw[n]}; src_ih[$k] = ${v_ih[n]};
+src_ex[$k] = ${v_ex[n]}; src_ey[$k] = ${v_ey[n]}; src_ew[$k] = ${v_ew[n]}; src_eh[$k] = ${v_eh[n]};
+EOF
+done
+cat <<EOF
+i = 0;
+while (i < display_count) {
+  hs[i] = 0;
+  best = 0;
+  n = 0;
+  while (n < bg_n) {
+    dd = dsp_w[i] / dsp_h[i] - src_iw[n] / src_ih[n];
+    if (dd < 0) dd = -dd;
+    if (dsp_w[i] == src_iw[n] && dsp_h[i] == src_ih[n]) dd = -1;
+    if (n == 0 || dd < best) {
+      hs[i] = n;
+      best = dd;
+    }
+    n++;
+  }
+  i++;
+}
+n = 0;
+while (n < bg_n) {
+  plain_ok[n] = 0;
+  global.boxed_ok[n] = 0;
+  n++;
+}
+# Per head: one scale factor for both axes, the leftover centred on that head.
+# Scaling each axis to the head independently distorted any background whose
+# aspect ratio did not match it -- 1920x1080 blown up to an ultrawide came out
+# 34% too wide. bg_fit picks which of the two factors wins.
+# Inline rather than in a function: a bare assignment inside a script function
+# creates a local, so the sizes would never reach the sprites below.
+i = 0;
+while (i < display_count) {
+  iw = src_iw[hs[i]];
+  ih = src_ih[hs[i]];
+  s = dsp_w[i] / iw;
+  if (dsp_h[i] / ih $bg_fit s) s = dsp_h[i] / ih;
+  bg_w[i] = iw * s;
+  bg_h[i] = ih * s;
+  bg_x[i] = dsp_x[i] + (dsp_w[i] - bg_w[i]) / 2;
+  bg_y[i] = dsp_y[i] + (dsp_h[i] - bg_h[i]) / 2;
+  i++;
+}
+EOF
+fi
 
 if [[ -n $bg_has_box && -f $staging/bg-plain.png ]]; then
 cat <<'EOF'
@@ -209,20 +361,46 @@ cat <<'EOF'
 # prompt up -- and bg.png with the box overlays it exactly while a passphrase
 # prompt is live, so the box is never dead chrome. The boxed image loads
 # lazily; a run that never prompts never decodes it.
-bg.plain_sprite = Sprite(Image("bg-plain.png").Scale(bg.w, bg.h));
-bg.plain_sprite.SetPosition(bg.x, bg.y, 0);
-bg.sprite = Sprite();
-bg.sprite.SetPosition(bg.x, bg.y, 1);
+# Each capture is decoded once, and only when a head shows it.
+i = 0;
+while (i < display_count) {
+  if (plain_ok[hs[i]] != 1) {
+    plain_img[hs[i]] = Image(src_plain[hs[i]]);
+    plain_ok[hs[i]] = 1;
+  }
+  bg_plain_sprites[i] = Sprite(plain_img[hs[i]].Scale(bg_w[i], bg_h[i]));
+  bg_plain_sprites[i].SetPosition(bg_x[i], bg_y[i], 0);
+  bg_sprites[i] = Sprite();
+  bg_sprites[i].SetPosition(bg_x[i], bg_y[i], 1);
+  if (global.show_design == 0) bg_plain_sprites[i].SetOpacity(0);
+  i++;
+}
 global.bg_loaded = 0;
 fun bg_prompt() {
   if (global.bg_loaded == 0) {
-    bg.sprite.SetImage(Image("bg.png").Scale(bg.w, bg.h));
+    i = 0;
+    while (i < display_count) {
+      if (global.boxed_ok[hs[i]] != 1) {
+        global.boxed_img[hs[i]] = Image(src_file[hs[i]]);
+        global.boxed_ok[hs[i]] = 1;
+      }
+      bg_sprites[i].SetImage(global.boxed_img[hs[i]].Scale(bg_w[i], bg_h[i]));
+      i++;
+    }
     global.bg_loaded = 1;
   }
-  bg.sprite.SetOpacity(1);
+  i = 0;
+  while (i < display_count) {
+    bg_sprites[i].SetOpacity(1);
+    i++;
+  }
 }
 fun bg_idle() {
-  bg.sprite.SetOpacity(0);
+  i = 0;
+  while (i < display_count) {
+    bg_sprites[i].SetOpacity(0);
+    i++;
+  }
 }
 EOF
 elif [[ -n $bg_has_box ]]; then
@@ -233,94 +411,150 @@ cat <<'EOF'
 # image out and show the plain theme background. A prompt that does fire
 # brings it back -- the bullets belong inside the painted box -- and loading
 # lazily spares the decode entirely on a promptless shutdown.
-bg.sprite = Sprite();
-bg.sprite.SetPosition(bg.x, bg.y, 0);
+i = 0;
+while (i < display_count) {
+  bg_sprites[i] = Sprite();
+  bg_sprites[i].SetPosition(bg_x[i], bg_y[i], 0);
+  i++;
+}
 global.bg_loaded = 0;
 fun bg_prompt() {
   if (global.bg_loaded == 0) {
-    bg.sprite.SetImage(Image("bg.png").Scale(bg.w, bg.h));
+    i = 0;
+    while (i < display_count) {
+      if (global.boxed_ok[hs[i]] != 1) {
+        global.boxed_img[hs[i]] = Image(src_file[hs[i]]);
+        global.boxed_ok[hs[i]] = 1;
+      }
+      bg_sprites[i].SetImage(global.boxed_img[hs[i]].Scale(bg_w[i], bg_h[i]));
+      i++;
+    }
     global.bg_loaded = 1;
   }
-  bg.sprite.SetOpacity(1);
+  i = 0;
+  while (i < display_count) {
+    bg_sprites[i].SetOpacity(1);
+    i++;
+  }
 }
 EOF
 emit_downward_gate bg_wanted
 cat <<'EOF'
 fun bg_idle() {
-  if (global.bg_wanted == 0) bg.sprite.SetOpacity(0);
+  if (global.bg_wanted == 0) {
+    i = 0;
+    while (i < display_count) {
+      bg_sprites[i].SetOpacity(0);
+      i++;
+    }
+  }
 }
 if (global.bg_wanted == 1) bg_prompt();
 EOF
 elif [[ -f $staging/bg.png ]]; then
 cat <<'EOF'
-bg.sprite = Sprite(Image("bg.png").Scale(bg.w, bg.h));
-bg.sprite.SetPosition(bg.x, bg.y, 0);
+bg.image = Image("bg.png");
+i = 0;
+while (i < display_count) {
+  bg_sprites[i] = Sprite(bg.image.Scale(bg_w[i], bg_h[i]));
+  bg_sprites[i].SetPosition(bg_x[i], bg_y[i], 0);
+  if (global.show_design == 0) bg_sprites[i].SetOpacity(0);
+  i++;
+}
 EOF
 fi
 
 [[ -f $staging/scanline.png ]] && cat <<'EOF'
 scan.sprite = Sprite(Image("scanline.png").Tile(screen.w, screen.h));
-scan.sprite.SetPosition(0, 0, 1);
+scan.sprite.SetPosition(screen.x, screen.y, 1);
+if (global.show_design == 0) scan.sprite.SetOpacity(0);
 EOF
 
 [[ -f $staging/logo.png ]] && cat <<EOF
 logo.image = Image("logo.png");
 logo.scaled = logo.image.Scale(logo.image.GetWidth() * $logo_h / logo.image.GetHeight(), $logo_h);
 logo.sprite = Sprite(logo.scaled);
-logo.sprite.SetPosition(screen.w / 2 - logo.scaled.GetWidth() / 2, screen.h * $logo_y / 100 - logo.scaled.GetHeight() / 2, 5);
+logo.sprite.SetPosition(screen.x + screen.w / 2 - logo.scaled.GetWidth() / 2, screen.y + screen.h * $logo_y / 100 - logo.scaled.GetHeight() / 2, 5);
+if (global.show_design == 0) logo.sprite.SetOpacity(0);
 EOF
 
 [[ -n $title ]] && cat <<EOF
 title.image = Image.Text("$title", $title_f, 1, "$family $title_size");
 title.sprite = Sprite(title.image);
-title.sprite.SetPosition(screen.w / 2 - title.image.GetWidth() / 2, screen.h * $title_y / 100 - title.image.GetHeight() / 2, 5);
+title.sprite.SetPosition(screen.x + screen.w / 2 - title.image.GetWidth() / 2, screen.y + screen.h * $title_y / 100 - title.image.GetHeight() / 2, 5);
+if (global.show_design == 0) title.sprite.SetOpacity(0);
 EOF
 
 [[ -n $subtitle ]] && cat <<EOF
 subtitle.image = Image.Text("$subtitle", $subtitle_f, 1, "$family $subtitle_size");
 subtitle.sprite = Sprite(subtitle.image);
-subtitle.sprite.SetPosition(screen.w / 2 - subtitle.image.GetWidth() / 2, screen.h * $subtitle_y / 100 - subtitle.image.GetHeight() / 2, 5);
+subtitle.sprite.SetPosition(screen.x + screen.w / 2 - subtitle.image.GetWidth() / 2, screen.y + screen.h * $subtitle_y / 100 - subtitle.image.GetHeight() / 2, 5);
+if (global.show_design == 0) subtitle.sprite.SetOpacity(0);
 EOF
 
 if [[ $entry != none ]]; then
+# The entry, its bullets and the wait arc are drawn on every head. The boxed
+# background already lands on each one, and Plymouth's head order is the
+# kernel's connector order, not the session's primary display: with the
+# bullets on the first head alone, a laptop panel enumerated after an external
+# monitor showed an input box that never filled as the passphrase was typed
+# (issue #75). Per-head state sits in arrays indexed by head.
 if [[ -f $staging/entry.png ]]; then
 cat <<EOF
 entry.image = Image("entry.png");
-entry.sprite = Sprite(entry.image);
-entry.cx = screen.w * $entry_x / 100;
-entry.cy = screen.h * $entry_y / 100;
-entry.iw = entry.image.GetWidth() - 48;
-entry.sprite.SetPosition(entry.cx - entry.image.GetWidth() / 2, entry.cy - entry.image.GetHeight() / 2, 5);
-
-# Hidden until a passphrase prompt actually fires: plymouthd runs this theme
-# for reboot/shutdown too (and for unencrypted boots), where a visible entry
-# reads as a prompt that will never accept input.
-entry.sprite.SetOpacity(0);
+d = 0;
+while (d < display_count) {
+  ent_cx[d] = dsp_x[d] + dsp_w[d] * $entry_x / 100;
+  ent_cy[d] = dsp_y[d] + dsp_h[d] * $entry_y / 100;
+  ent_iw[d] = entry.image.GetWidth() - 48;
+  # The text area inside the pill, about as tall as a snapshot's measured one.
+  ent_ih[d] = entry.image.GetHeight() * 0.6;
+  entry_sprites[d] = Sprite(entry.image);
+  entry_sprites[d].SetPosition(ent_cx[d] - entry.image.GetWidth() / 2, ent_cy[d] - entry.image.GetHeight() / 2, 5);
+  # Hidden until a passphrase prompt actually fires: plymouthd runs this theme
+  # for reboot/shutdown too (and for unencrypted boots), where a visible entry
+  # reads as a prompt that will never accept input.
+  entry_sprites[d].SetOpacity(0);
+  d++;
+}
 EOF
 else
 cat <<EOF
 # Embedded entry: the input box is drawn in the background image already;
 # only the bullets and the spinner go on top of it.
-entry.sprite = Sprite();
-# Relative to the drawn background, not to the screen: the box is painted into
-# the image, so the bullets have to follow wherever the image landed.
-entry.cx = bg.x + bg.w * $entry_x / 100;
-entry.cy = bg.y + bg.h * $entry_y / 100;
-entry.iw = bg.w * $entry_wp / 100;
+d = 0;
+while (d < display_count) {
+  entry_sprites[d] = Sprite();
+  # Relative to the drawn background, not to the screen: the box is painted
+  # into the image, so the bullets have to follow wherever the image landed.
+  # Each head's capture has its own box position.
+  ent_cx[d] = bg_x[d] + bg_w[d] * src_ex[hs[d]] / 100;
+  ent_cy[d] = bg_y[d] + bg_h[d] * src_ey[hs[d]] / 100;
+  ent_iw[d] = bg_w[d] * src_ew[hs[d]] / 100;
+  # The measured input area's height; 0 in a snapshot conf from before it was
+  # recorded, which leaves the wait arc at its minimum size below.
+  ent_ih[d] = bg_h[d] * src_eh[hs[d]] / 100;
+  d++;
+}
 EOF
 fi
 cat <<EOF
 
-# One sprite per typed character, spread around the entry center, so the row
-# is pixel-centered in the box both ways.
+# One sprite per typed character and head, spread around the entry center, so
+# the row is pixel-centered in the box both ways. Head d owns bullets
+# d * 24 to d * 24 + 23.
 bullet.image = Image("dot.png");
-for (i = 0; i < 24; i++) {
+for (i = 0; i < 24 * display_count; i++) {
   bullets[i] = Sprite(bullet.image);
   bullets[i].SetOpacity(0);
 }
 
 fun hide_bullets() {
-  for (i = 0; i < 24; i++) bullets[i].SetOpacity(0);
+  for (i = 0; i < 24 * display_count; i++) bullets[i].SetOpacity(0);
+}
+
+fun show_entries(o) {
+  for (d = 0; d < display_count; d++) entry_sprites[d].SetOpacity(o);
 }
 
 # After the passphrase is submitted the entry swaps for pulsing dots, so a
@@ -330,32 +564,51 @@ fun hide_bullets() {
 global.prompt_seen = 0;
 global.boot_wait = 0;
 global.boot_frame = 0;
-booting.sprite = Sprite();
-booting.sprite.SetOpacity(0);
+for (d = 0; d < display_count; d++) {
+  booting_sprites[d] = Sprite();
+  booting_sprites[d].SetOpacity(0);
+}
+
+fun show_booting(o) {
+  for (d = 0; d < display_count; d++) booting_sprites[d].SetOpacity(o);
+}
 EOF
 # Literal lines: plymouth script string+number concatenation is unreliable.
-for i in $(seq 1 12); do echo "spin[$i] = Image(\"spin$i.png\");"; done
+for i in $(seq 1 12); do echo "spin_src[$i] = Image(\"spin$i.png\");"; done
+cat <<'EOF'
+# The wait arc replaces what was typed, so it takes that line's size on each
+# head -- about half the box -- and never shrinks below the 22 px it was once
+# drawn at. Head d's frames are spin[d * 12 + 1] to spin[d * 12 + 12].
+for (d = 0; d < display_count; d++) {
+  spinsize = Math.Int(ent_ih[d] * 0.95);
+  if (spinsize < 22) spinsize = 22;
+  for (n = 1; n <= 12; n++) spin[d * 12 + n] = spin_src[n].Scale(spinsize, spinsize);
+}
+EOF
 cat <<EOF
 
 fun display_password_callback(prompt_text, count) {
+  if (global.show_design == 0) return;
   global.prompt_seen = 1;
   global.boot_wait = 0;
   $bg_show
-  entry.sprite.SetOpacity(1);
+  show_entries(1);
   $hint_show
-  booting.sprite.SetOpacity(0);
+  show_booting(0);
   if (count > 24) count = 24;
   step = bullet.image.GetWidth() + 8;
   align = "$entry_align";
-  if (align == "left") x0 = entry.cx - entry.iw / 2;
-  else if (align == "right") x0 = entry.cx + entry.iw / 2 - (count * step - 8);
-  else x0 = entry.cx - (count * step - 8) / 2;
-  for (i = 0; i < 24; i++) {
-    if (i < count) {
-      bullets[i].SetPosition(x0 + i * step, entry.cy - bullet.image.GetHeight() / 2, 6);
-      bullets[i].SetOpacity(1);
-    } else {
-      bullets[i].SetOpacity(0);
+  for (d = 0; d < display_count; d++) {
+    if (align == "left") x0 = ent_cx[d] - ent_iw[d] / 2;
+    else if (align == "right") x0 = ent_cx[d] + ent_iw[d] / 2 - (count * step - 8);
+    else x0 = ent_cx[d] - (count * step - 8) / 2;
+    for (i = 0; i < 24; i++) {
+      if (i < count) {
+        bullets[d * 24 + i].SetPosition(x0 + i * step, ent_cy[d] - bullet.image.GetHeight() / 2, 6);
+        bullets[d * 24 + i].SetOpacity(1);
+      } else {
+        bullets[d * 24 + i].SetOpacity(0);
+      }
     }
   }
 }
@@ -365,19 +618,22 @@ fun display_normal_callback() {
   $bg_rehide
   if (global.prompt_seen == 1) {
     global.boot_wait = 1;
-    entry.sprite.SetOpacity(0);
-    booting.sprite.SetOpacity(1);
+    show_entries(0);
+    show_booting(1);
   }
 }
 
 fun refresh_callback() {
+  place_heads();
   if (global.boot_wait == 1) {
     global.boot_frame = global.boot_frame + 1;
     k = Math.Int(global.boot_frame / 4);
     n = k - Math.Int(k / 12) * 12 + 1;
-    b = spin[n];
-    booting.sprite.SetImage(b);
-    booting.sprite.SetPosition(entry.cx - b.GetWidth() / 2, entry.cy - b.GetHeight() / 2, 6);
+    for (d = 0; d < display_count; d++) {
+      b = spin[d * 12 + n];
+      booting_sprites[d].SetImage(b);
+      booting_sprites[d].SetPosition(ent_cx[d] - b.GetWidth() / 2, ent_cy[d] - b.GetHeight() / 2, 6);
+    }
   }
 }
 
@@ -391,7 +647,8 @@ if [[ -n $hint ]]; then
 cat <<EOF
 hint.image = Image.Text("$hint", dim.r, dim.g, dim.b, 1, "$family 12");
 hint.sprite = Sprite(hint.image);
-hint.sprite.SetPosition(screen.w - hint.image.GetWidth() - 60, screen.h - hint.image.GetHeight() - 50, 5);
+hint.sprite.SetPosition(screen.x + screen.w - hint.image.GetWidth() - 60, screen.y + screen.h - hint.image.GetHeight() - 50, 5);
+if (global.show_design == 0) hint.sprite.SetOpacity(0);
 EOF
 [[ $entry != none ]] && cat <<'EOF'
 # Hidden until a prompt fires, like the entry it explains.
@@ -402,7 +659,7 @@ fi
 cat <<EOF
 
 message_sprite = Sprite();
-message_sprite.SetPosition(20, screen.h - 40, 6);
+message_sprite.SetPosition(screen.x + 20, screen.y + screen.h - 40, 6);
 
 fun display_message_callback(text) {
   message_sprite.SetImage(Image.Text(text, dim.r, dim.g, dim.b, 1, "$family 12"));

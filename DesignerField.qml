@@ -1,6 +1,9 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
+import "designs"
 import "Designer.js" as D
+import "ExplorerStrings.js" as UiText
 
 // One row in the designer's inspector. The kind's field list (Designer.js)
 // says which type to draw; every one of them reports back through edited().
@@ -8,20 +11,23 @@ Item {
   id: field
 
   property string label: ""
+  property string language: "en"
+  function tr(text) { return UiText.tr(field.language, text) }
   property string type: "text"
   property var value: null
   property var options: []
   property real minimum: 0
   property real maximum: 1
   property real step: 0.05
-  property color foreground: Color.menu.text
-  property color accent: Color.accent
+  property color foreground: Commons.Color.menu.text
+  property color accent: Commons.Color.accent
   readonly property color muted: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.55)
   readonly property color well: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.07)
   readonly property color line: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.16)
 
   signal edited(var next)
   signal pickFileRequested()
+  signal drawArtRequested()
   // Esc in a field leaves it rather than closing the designer; the canvas
   // takes the keyboard back.
   signal escaped()
@@ -59,6 +65,7 @@ Item {
         case "color": return colorC
         case "bool": return boolC
         case "file": return fileC
+        case "art": return artC
         case "code": return codeC
         }
         return textC
@@ -77,7 +84,7 @@ Item {
       border.width: 1
       border.color: entry.activeFocus ? field.accent : field.line
 
-      TextInput {
+      TypedInput {
         id: entry
         anchors.fill: parent
         anchors.leftMargin: Style.space(8)
@@ -117,7 +124,7 @@ Item {
         border.width: 1
         border.color: numberEntry.activeFocus ? field.accent : field.line
 
-        TextInput {
+        TypedInput {
           id: numberEntry
           anchors.fill: parent
           anchors.leftMargin: Style.space(8)
@@ -268,7 +275,7 @@ Item {
             anchors.centerIn: parent
             text: parent.modelData.name
             textFormat: Text.PlainText
-            color: parent.current ? Color.background : field.foreground
+            color: parent.current ? Commons.Color.background : field.foreground
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.caption
           }
@@ -321,7 +328,7 @@ Item {
         color: field.well
         border.width: 1
         border.color: hexEntry.activeFocus ? field.accent : field.line
-        TextInput {
+        TypedInput {
           id: hexEntry
           anchors.fill: parent
           anchors.leftMargin: Style.space(8)
@@ -338,7 +345,7 @@ Item {
             anchors.fill: parent
             verticalAlignment: Text.AlignVCenter
             visible: hexEntry.text.length === 0
-            text: "or #rrggbb"
+            text: field.tr("or #rrggbb")
             color: field.muted
             font: hexEntry.font
           }
@@ -372,7 +379,7 @@ Item {
           width: parent.height - Style.space(6)
           height: width
           radius: width / 2
-          color: field.value === true ? Color.background : field.foreground
+          color: field.value === true ? Commons.Color.background : field.foreground
           Behavior on x { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
         }
 
@@ -385,6 +392,78 @@ Item {
   }
 
   // ------------------------------------------------------------------ file
+
+  // ------------------------------------------------------------------- art
+
+  // The drawing itself is block characters, so the row can show it as it is.
+  Component {
+    id: artC
+    Row {
+      spacing: Style.space(6)
+      Rectangle {
+        width: Style.space(70)
+        height: Style.space(26)
+        radius: 4
+        color: drawArea.containsMouse ? Qt.rgba(field.foreground.r, field.foreground.g, field.foreground.b, 0.16) : field.well
+        border.width: 1
+        border.color: field.line
+        Text {
+          anchors.centerIn: parent
+          text: field.tr("Draw…")
+          color: field.foreground
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+        }
+        MouseArea {
+          id: drawArea
+          anchors.fill: parent
+          hoverEnabled: true
+          onClicked: field.drawArtRequested()
+        }
+      }
+
+      Rectangle {
+        width: field.width - Style.space(82)
+        height: Style.space(48)
+        radius: 4
+        color: field.well
+        border.width: 1
+        border.color: field.line
+        clip: true
+
+        Text {
+          id: artPreview
+          anchors.centerIn: parent
+          readonly property var lines: String(field.value || "").split("
+")
+          readonly property int cols: {
+            var w = 0
+            for (var i = 0; i < lines.length; i++) w = Math.max(w, lines[i].length)
+            return Math.max(1, w)
+          }
+          text: String(field.value || "")
+          textFormat: Text.PlainText
+          color: field.foreground
+          font.family: "monospace"
+          // Shrunk to fit the row, whatever the drawing's size.
+          font.pixelSize: Math.max(2, Math.min(
+            Math.floor((parent.height - 6) / Math.max(1, lines.length) * 1.35),
+            Math.floor((parent.width - 8) / cols * 1.9)))
+          lineHeight: 0.74
+          visible: String(field.value || "").length > 0
+        }
+
+        Text {
+          anchors.centerIn: parent
+          text: field.tr("nothing drawn yet")
+          color: field.muted
+          font.family: Style.font.menuFamily
+          font.pixelSize: Style.font.caption
+          visible: !artPreview.visible
+        }
+      }
+    }
+  }
 
   Component {
     id: fileC
@@ -399,7 +478,7 @@ Item {
         border.color: field.line
         Text {
           anchors.centerIn: parent
-          text: "Choose…"
+          text: field.tr("Choose…")
           color: field.foreground
           font.family: Style.font.menuFamily
           font.pixelSize: Style.font.caption
@@ -414,7 +493,7 @@ Item {
       Text {
         anchors.verticalCenter: parent.verticalCenter
         width: field.width - Style.space(82)
-        text: String(field.value || "").length > 0 ? String(field.value).split("/").pop() : "none"
+        text: String(field.value || "").length > 0 ? String(field.value).split("/").pop() : field.tr("none")
         textFormat: Text.PlainText
         color: field.muted
         font.family: Style.font.menuFamily
@@ -444,7 +523,7 @@ Item {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
 
-        TextEdit {
+        TypedEdit {
           id: codeEdit
           width: Math.max(parent.width, contentWidth)
           text: String(field.value || "")
@@ -465,9 +544,6 @@ Item {
                 && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) {
               field.edited(codeEdit.text)
               event.accepted = true
-            } else if (event.key === Qt.Key_Tab) {
-              codeEdit.insert(codeEdit.cursorPosition, "  ")
-              event.accepted = true
             }
           }
         }
@@ -477,7 +553,7 @@ Item {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: Style.space(6)
-        text: "Ctrl+Enter applies"
+        text: field.tr("Ctrl+Enter applies")
         color: field.muted
         font.family: Style.font.menuFamily
         font.pixelSize: Style.font.caption
