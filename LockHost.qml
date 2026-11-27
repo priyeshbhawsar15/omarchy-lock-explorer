@@ -378,6 +378,7 @@ Item {
           anchors.margins: 14
           verticalAlignment: TextInput.AlignVCenter
           echoMode: TextInput.Password
+          passwordField: true
           passwordCharacter: "●"
           color: "#eeeeee"
           font.pixelSize: 18
